@@ -64,14 +64,20 @@ app.use(activityLogger);
 
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
-app.get("/health", (_req, res) => {
+function healthResponse(_req, res) {
   const mongoReady = mongoose.connection.readyState === 1;
   res.status(mongoReady ? 200 : 503).json({
+    success: mongoReady,
     ok: mongoReady,
     mongoReady,
     readyState: mongoose.connection.readyState,
   });
-});
+}
+
+app.get("/health", healthResponse);
+// Keep the health endpoint outside the database readiness middleware so it can
+// report the actual connection state while MongoDB is unavailable.
+app.get("/api/health", healthResponse);
 
 // Fail fast on API while Mongo is reconnecting (avoids long hung logins)
 app.use("/api", requireDbReady);
@@ -174,7 +180,7 @@ async function shutdown(signal) {
 process.once("SIGINT", () => void shutdown("SIGINT"));
 process.once("SIGTERM", () => void shutdown("SIGTERM"));
 
-async function connectMongoWithRetry() {
+export async function connectMongoWithRetry() {
   for (;;) {
     try {
       await connectMongo();
@@ -209,7 +215,13 @@ async function start() {
   }
 }
 
-start().catch((err) => {
-  console.error("Failed to start server:", err);
-  process.exit(1);
-});
+export { app };
+
+// Vercel imports the Express app from api/index.js and manages the listener.
+// The long-running boot sequence is only for local/server deployments.
+if (!process.env.VERCEL) {
+  start().catch((err) => {
+    console.error("Failed to start server:", err);
+    process.exit(1);
+  });
+}
