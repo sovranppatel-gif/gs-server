@@ -1,0 +1,336 @@
+{
+  "meta": {
+    "collectionName": "admissions",
+    "docCount": 0,
+    "indexes": [
+      {
+        "v": 2,
+        "key": {
+          "_id": 1
+        },
+        "name": "_id_"
+      }
+    ],
+    "chosen": {
+      "courseId": null,
+      "universityId": null,
+      "batchId": null,
+      "session": null,
+      "currentSemester": null,
+      "searchTerm": null
+    }
+  },
+  "queries": [
+    {
+      "name": "A-default-list",
+      "filter": {
+        "status": {
+          "$exists": true
+        }
+      },
+      "sort": {
+        "admissionDate": -1
+      },
+      "limit": 25,
+      "sampleCount": 0,
+      "samplePayloadBytes": 2,
+      "explainSummary": {
+        "executionTimeMillis": 6,
+        "nReturned": 0,
+        "totalDocsExamined": 0,
+        "totalKeysExamined": 0,
+        "winningPlan": {
+          "isCached": false,
+          "stage": "LIMIT",
+          "limitAmount": 25,
+          "inputStage": {
+            "stage": "FETCH",
+            "filter": {
+              "status": {
+                "$exists": true
+              }
+            },
+            "inputStage": {
+              "stage": "IXSCAN",
+              "keyPattern": {
+                "admissionDate": -1
+              },
+              "indexName": "admissionDate_-1",
+              "isMultiKey": false,
+              "multiKeyPaths": {
+                "admissionDate": []
+              },
+              "isUnique": false,
+              "isSparse": false,
+              "isPartial": false,
+              "indexVersion": 2,
+              "direction": "forward",
+              "indexBounds": {
+                "admissionDate": [
+                  "[MaxKey, MinKey]"
+                ]
+              }
+            }
+          }
+        },
+        "stages": [
+          "LIMIT",
+          "FETCH",
+          "IXSCAN"
+        ],
+        "hasCOLLSCAN": false,
+        "hasIXSCAN": true,
+        "hasSORT": false
+      },
+      "fullExplain": {
+        "explainVersion": "1",
+        "queryPlanner": {
+          "namespace": "growskillstech.admissions",
+          "parsedQuery": {
+            "status": {
+              "$exists": true
+            }
+          },
+          "indexFilterSet": false,
+          "queryHash": "ED156D8D",
+          "planCacheShapeHash": "ED156D8D",
+          "planCacheKey": "5E83EB9B",
+          "optimizationTimeMillis": 5,
+          "maxIndexedOrSolutionsReached": false,
+          "maxIndexedAndSolutionsReached": false,
+          "maxScansToExplodeReached": false,
+          "prunedSimilarIndexes": false,
+          "winningPlan": {
+            "isCached": false,
+            "stage": "LIMIT",
+            "limitAmount": 25,
+            "inputStage": {
+              "stage": "FETCH",
+              "filter": {
+                "status": {
+                  "$exists": true
+                }
+              },
+              "inputStage": {
+                "stage": "IXSCAN",
+                "keyPattern": {
+                  "admissionDate": -1
+                },
+                "indexName": "admissionDate_-1",
+                "isMultiKey": false,
+                "multiKeyPaths": {
+                  "admissionDate": []
+                },
+                "isUnique": false,
+                "isSparse": false,
+                "isPartial": false,
+                "indexVersion": 2,
+                "direction": "forward",
+                "indexBounds": {
+                  "admissionDate": [
+                    "[MaxKey, MinKey]"
+                  ]
+                }
+              }
+            }
+          },
+          "rejectedPlans": [
+            {
+              "isCached": false,
+              "stage": "SORT",
+              "sortPattern": {
+                "admissionDate": -1
+              },
+              "memLimit": 104857600,
+              "limitAmount": 25,
+              "type": "simple",
+              "inputStage": {
+                "stage": "FETCH",
+                "filter": {
+                  "status": {
+                    "$exists": true
+                  }
+                },
+                "inputStage": {
+                  "stage": "IXSCAN",
+                  "keyPattern": {
+                    "status": 1,
+                    "admissionDate": -1
+                  },
+                  "indexName": "status_1_admissionDate_-1",
+                  "isMultiKey": false,
+                  "multiKeyPaths": {
+                    "status": [],
+                    "admissionDate": []
+                  },
+                  "isUnique": false,
+                  "isSparse": false,
+                  "isPartial": false,
+                  "indexVersion": 2,
+                  "direction": "forward",
+                  "indexBounds": {
+                    "status": [
+                      "[MinKey, MaxKey]"
+                    ],
+                    "admissionDate": [
+                      "[MaxKey, MinKey]"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "executionStats": {
+          "executionSuccess": true,
+          "nReturned": 0,
+          "executionTimeMillis": 6,
+          "totalKeysExamined": 0,
+          "totalDocsExamined": 0,
+          "executionStages": {
+            "isCached": false,
+            "stage": "LIMIT",
+            "nReturned": 0,
+            "executionTimeMillisEstimate": 0,
+            "works": 2,
+            "advanced": 0,
+            "needTime": 0,
+            "needYield": 0,
+            "saveState": 0,
+            "restoreState": 0,
+            "isEOF": 1,
+            "limitAmount": 25,
+            "inputStage": {
+              "stage": "FETCH",
+              "filter": {
+                "status": {
+                  "$exists": true
+                }
+              },
+              "nReturned": 0,
+              "executionTimeMillisEstimate": 0,
+              "works": 2,
+              "advanced": 0,
+              "needTime": 0,
+              "needYield": 0,
+              "saveState": 0,
+              "restoreState": 0,
+              "isEOF": 1,
+              "docsExamined": 0,
+              "alreadyHasObj": 0,
+              "inputStage": {
+                "stage": "IXSCAN",
+                "nReturned": 0,
+                "executionTimeMillisEstimate": 0,
+                "works": 1,
+                "advanced": 0,
+                "needTime": 0,
+                "needYield": 0,
+                "saveState": 0,
+                "restoreState": 0,
+                "isEOF": 1,
+                "keyPattern": {
+                  "admissionDate": -1
+                },
+                "indexName": "admissionDate_-1",
+                "isMultiKey": false,
+                "multiKeyPaths": {
+                  "admissionDate": []
+                },
+                "isUnique": false,
+                "isSparse": false,
+                "isPartial": false,
+                "indexVersion": 2,
+                "direction": "forward",
+                "indexBounds": {
+                  "admissionDate": [
+                    "[MaxKey, MinKey]"
+                  ]
+                },
+                "keysExamined": 0,
+                "seeks": 1,
+                "dupsTested": 0,
+                "dupsDropped": 0
+              }
+            }
+          }
+        },
+        "queryShapeHash": "673C28816180B5C88286A23C4AF0DBF7CBA0AB4A35406D6E196E378293B17232",
+        "command": {
+          "find": "admissions",
+          "filter": {
+            "status": {
+              "$exists": true
+            }
+          },
+          "sort": {
+            "admissionDate": -1
+          },
+          "limit": 25,
+          "$db": "growskillstech"
+        },
+        "serverInfo": {
+          "host": "DESKTOP-INL23DB",
+          "port": 27017,
+          "version": "8.0.26",
+          "gitVersion": "a2c24805265db119cc39f2f54e067b4294a4ddd2"
+        },
+        "serverParameters": {
+          "internalQueryFacetBufferSizeBytes": 104857600,
+          "internalQueryFacetMaxOutputDocSizeBytes": 104857600,
+          "internalLookupStageIntermediateDocumentMaxSizeBytes": 104857600,
+          "internalDocumentSourceGroupMaxMemoryBytes": 104857600,
+          "internalQueryMaxBlockingSortMemoryUsageBytes": 104857600,
+          "internalQueryProhibitBlockingMergeOnMongoS": 0,
+          "internalQueryMaxAddToSetBytes": 104857600,
+          "internalDocumentSourceSetWindowFieldsMaxMemoryBytes": 104857600,
+          "internalQueryFrameworkControl": "trySbeRestricted",
+          "internalQueryPlannerIgnoreIndexWithCollationForRegex": 1
+        },
+        "ok": 1
+      }
+    },
+    {
+      "name": "B-course-filter",
+      "notTestable": true,
+      "reason": "no sample value available for this filter",
+      "sampleUsed": null
+    },
+    {
+      "name": "C-university-filter",
+      "notTestable": true,
+      "reason": "no sample value available for this filter",
+      "sampleUsed": null
+    },
+    {
+      "name": "D-batch-filter",
+      "notTestable": true,
+      "reason": "no sample value available for this filter",
+      "sampleUsed": null
+    },
+    {
+      "name": "E-sessionTop",
+      "notTestable": true,
+      "reason": "no sample value available for this filter",
+      "sampleUsed": null
+    },
+    {
+      "name": "E-sessionDetails",
+      "notTestable": true,
+      "reason": "no sample value available for this filter",
+      "sampleUsed": null
+    },
+    {
+      "name": "F-course-session",
+      "notTestable": true,
+      "reason": "no sample value available for this filter",
+      "sampleUsed": null
+    },
+    {
+      "name": "G-search-regex",
+      "notTestable": true,
+      "reason": "no sample value available for this filter",
+      "sampleUsed": null
+    }
+  ]
+}
