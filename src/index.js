@@ -88,6 +88,17 @@ app.get("/", (_req, res) => {
   });
 });
 
+// Vercel may pass the rewritten function path as /api/index.js for the root
+// rewrite. Treat it as the API root instead of returning a framework 404.
+app.get("/api/index.js", (_req, res) => {
+  res.json({
+    success: true,
+    service: "Grow Skills Tech API",
+    message: "API is running",
+    health: "/api/health",
+  });
+});
+
 // Fail fast on API while Mongo is reconnecting (avoids long hung logins)
 app.use("/api", requireDbReady);
 
