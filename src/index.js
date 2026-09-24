@@ -236,6 +236,9 @@ async function start() {
 }
 
 export { app };
+// Vercel may discover this module through the package entrypoint. Export the
+// Express app as default so it is also a valid serverless function entry.
+export default app;
 
 // Vercel imports the Express app from api/index.js and manages the listener.
 // The long-running boot sequence is only for local/server deployments.
