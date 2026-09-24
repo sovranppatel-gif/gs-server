@@ -79,6 +79,15 @@ app.get("/health", healthResponse);
 // report the actual connection state while MongoDB is unavailable.
 app.get("/api/health", healthResponse);
 
+app.get("/", (_req, res) => {
+  res.json({
+    success: true,
+    service: "Grow Skills Tech API",
+    message: "API is running",
+    health: "/api/health",
+  });
+});
+
 // Fail fast on API while Mongo is reconnecting (avoids long hung logins)
 app.use("/api", requireDbReady);
 
