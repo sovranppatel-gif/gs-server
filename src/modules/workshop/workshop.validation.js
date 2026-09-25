@@ -18,6 +18,9 @@ export const VALID_COURSES = [
   "M.Sc",
   "B.Com",
   "MBA",
+  "BA",
+  "MA",
+  "MCOM",
   "Other",
 ];
 
@@ -34,6 +37,7 @@ export const VALID_SEMESTER_YEARS = [
   "2nd Year",
   "3rd Year",
   "Final Year",
+  "PASSOUT",
 ];
 
 export const VALID_CODING_EXPERIENCE = [
