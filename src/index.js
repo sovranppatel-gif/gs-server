@@ -29,6 +29,18 @@ import staffRoutes from "./modules/staff/staff.routes.js";
 import activityLogRoutes from "./modules/activityLog/activityLog.routes.js";
 import masterAdminStudentsRoutes from "./routes/masterAdmin.students.routes.js";
 import workshopRoutes from "./modules/workshop/workshop.routes.js";
+import {
+  sessionsRouter as workshopSessionsRoutes,
+  attendanceRouter as workshopAttendanceRoutes,
+  studentsRouter as workshopStudentsRoutes,
+  tasksRouter as workshopTasksRoutes,
+  whatsappRouter as workshopWhatsappRoutes,
+  certificatesRouter as workshopCertificatesRoutes,
+  settingsRouter as workshopSettingsRoutes,
+  reportsRouter as workshopReportsRoutes,
+} from "./modules/workshopManagement/workshopManagement.routes.js";
+import whatsappRoutes from "./modules/whatsapp/whatsapp.routes.js";
+import { startWhatsappWorker } from "./modules/whatsapp/services/worker.service.js";
 import { activityLogger } from "./middleware/activityLogger.js";
 import { requireDbReady } from "./middleware/requireDbReady.js";
 import { initSocket } from "./lib/socket.js";
@@ -59,7 +71,18 @@ app.use(
     credentials: true,
   })
 );
-app.use(express.json({ limit: "5mb" }));
+// General WhatsApp webhook needs the exact raw bytes for Meta's signature check;
+// parsing it here makes the JSON parser below skip this path.
+app.use("/api/whatsapp/webhook", express.raw({ type: "*/*", limit: "2mb" }));
+app.use(
+  express.json({
+    limit: "5mb",
+    // Raw bytes are kept only for the WhatsApp webhook signature check.
+    verify: (req, _res, buf) => {
+      if (req.originalUrl?.startsWith("/api/workshop-whatsapp/webhook")) req.rawBody = buf;
+    },
+  })
+);
 app.use(activityLogger);
 
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
@@ -129,6 +152,16 @@ app.use("/api/staff", staffRoutes);
 app.use("/api/activity-logs", activityLogRoutes);
 app.use("/api/master-admin/students", masterAdminStudentsRoutes);
 app.use("/api/workshop-registrations", workshopRoutes);
+app.use("/api/workshop-sessions", workshopSessionsRoutes);
+app.use("/api/workshop-attendance", workshopAttendanceRoutes);
+app.use("/api/workshop-students", workshopStudentsRoutes);
+app.use("/api/workshop-tasks", workshopTasksRoutes);
+app.use("/api/workshop-whatsapp", workshopWhatsappRoutes);
+app.use("/api/workshop-certificates", workshopCertificatesRoutes);
+app.use("/api/workshop-settings", workshopSettingsRoutes);
+app.use("/api/workshop-reports", workshopReportsRoutes);
+// General WhatsApp (independent of Workshop WhatsApp above)
+app.use("/api/whatsapp", whatsappRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ success: false, message: "Not found" });
@@ -221,6 +254,7 @@ async function start() {
   // Keep HTTP up even if Atlas DNS flaps — login should not get "connection refused"
   await listen();
   await connectMongoWithRetry();
+  startWhatsappWorker();
 
   // Heavy demo seeds already live in Atlas — skip on every watch restart.
   // Run `npm run seed` or set SEED_ON_START=1 when you actually need them.
