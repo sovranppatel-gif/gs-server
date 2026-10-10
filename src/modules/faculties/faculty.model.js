@@ -25,6 +25,10 @@ const personalDetailsSchema = new mongoose.Schema(
 const employmentDetailsSchema = new mongoose.Schema(
   {
     designation: { type: String, required: true, trim: true },
+    // Academic department link. `department` (string) is kept as the
+    // denormalized display name — and, for records not yet migrated by
+    // scripts/migrateAcademicDepartments.js, the legacy free-text value.
+    departmentId: { type: mongoose.Schema.Types.ObjectId, ref: "AcademicDepartment", default: null },
     department: { type: String, default: "", trim: true },
     qualification: { type: String, default: "", trim: true },
     specialization: { type: String, default: "", trim: true },
@@ -70,6 +74,7 @@ const facultySchema = new mongoose.Schema(
 facultySchema.index({ softDelete: 1, status: 1, createdAt: -1 });
 facultySchema.index({ softDelete: 1, "employmentDetails.designation": 1 });
 facultySchema.index({ softDelete: 1, "employmentDetails.department": 1 });
+facultySchema.index({ softDelete: 1, "employmentDetails.departmentId": 1, status: 1 });
 facultySchema.index({ "personalDetails.mobile": 1 });
 facultySchema.index(
   { "personalDetails.email": 1 },

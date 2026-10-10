@@ -56,7 +56,9 @@ export function normalizeFacultyPayload(raw = {}) {
     },
     employmentDetails: {
       designation: normalizeString(employment.designation || raw.designation),
-      department: normalizeString(employment.department || raw.department),
+      // Only the departmentId is accepted from clients; the display name is
+      // filled in by the service from the AcademicDepartment record.
+      departmentId: normalizeString(employment.departmentId ?? raw.departmentId) || null,
       qualification: normalizeString(employment.qualification),
       specialization: normalizeString(employment.specialization),
       experienceYears: Math.max(0, toNumber(employment.experienceYears, 0)),

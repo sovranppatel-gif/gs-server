@@ -1,9 +1,12 @@
 import mongoose from "mongoose";
 import { Course } from "./courses.model.js";
 import { University } from "../universities/universities.model.js";
+import { AcademicDepartment } from "../academicDepartments/academicDepartment.model.js";
+import { resolveDepartmentForLink } from "../academicDepartments/academicDepartment.service.js";
 
-function toRow(doc) {
+function toRow(doc, deptById = null) {
   const d = doc?.toObject ? doc.toObject() : doc;
+  const dept = d.departmentId && deptById ? deptById.get(String(d.departmentId)) : null;
   const semesters = Array.isArray(d.semesters) ? d.semesters : [];
   const subjectCount = semesters.reduce(
     (sum, sem) => sum + (Array.isArray(sem.subjects) ? sem.subjects.length : 0),
@@ -14,6 +17,9 @@ function toRow(doc) {
     _id: String(d._id),
     id: String(d._id),
     universityId: d.universityId ? String(d.universityId) : null,
+    departmentId: d.departmentId ? String(d.departmentId) : "",
+    departmentName: dept?.name || "",
+    departmentCode: dept?.code || "",
     semesters,
     semesterCount: d.semesterCount || semesters.length || 0,
     subjectCount,
@@ -81,16 +87,44 @@ async function attachUniversityMeta(payload) {
   };
 }
 
+/** id → { name, code } for the departments referenced by these courses. */
+async function loadDepartmentMap(docs) {
+  const ids = [...new Set(docs.map((d) => d.departmentId).filter(Boolean).map(String))];
+  if (!ids.length) return new Map();
+  const depts = await AcademicDepartment.find({ _id: { $in: ids } }).select("name code").lean();
+  return new Map(depts.map((d) => [String(d._id), { name: d.name, code: d.code }]));
+}
+
+async function toRowWithDepartment(doc) {
+  if (!doc) return null;
+  const d = doc?.toObject ? doc.toObject() : doc;
+  return toRow(d, await loadDepartmentMap([d]));
+}
+
+/** Validates/normalizes payload.departmentId; leaves it untouched when the
+ * client didn't send one (see normalizeCoursePayload). */
+async function attachDepartment(payload, currentDepartmentId = null) {
+  if (!Object.prototype.hasOwnProperty.call(payload, "departmentId")) return payload;
+  const dept = await resolveDepartmentForLink(payload.departmentId, { currentDepartmentId });
+  return { ...payload, departmentId: dept?._id || null };
+}
+
 export async function listCourses({
   search = "",
   status = "",
   type = "",
   universityId = "",
+  departmentId = "",
 } = {}) {
   const query = { softDelete: false };
 
   if (status) query.status = status;
   if (type) query.type = type;
+  if (departmentId === "none") {
+    query.departmentId = { $not: { $type: "objectId" } };
+  } else if (departmentId) {
+    query.departmentId = mongoose.Types.ObjectId.isValid(departmentId) ? departmentId : { $in: [] };
+  }
 
   if (universityId && mongoose.Types.ObjectId.isValid(universityId)) {
     const uni = await University.findOne({
@@ -135,19 +169,20 @@ export async function listCourses({
   }
 
   const docs = await Course.find(query).sort({ name: 1 }).lean().maxTimeMS(8000);
-  const rows = docs.map(toRow);
+  const deptById = await loadDepartmentMap(docs);
+  const rows = docs.map((d) => toRow(d, deptById));
   return { rows, stats: buildStats(rows) };
 }
 
 export async function getCourseById(id) {
   const doc = await Course.findOne({ _id: id, softDelete: false }).lean();
-  return doc ? toRow(doc) : null;
+  return toRowWithDepartment(doc);
 }
 
 export async function createCourse(payload) {
-  const withMeta = await attachUniversityMeta(payload);
+  const withMeta = await attachDepartment(await attachUniversityMeta(payload));
   const created = await Course.create(withMeta);
-  return toRow(created);
+  return toRowWithDepartment(created);
 }
 
 export async function updateCourse(id, payload) {
@@ -156,14 +191,14 @@ export async function updateCourse(id, payload) {
     .lean();
   if (!existing) return null;
 
-  const withMeta = await attachUniversityMeta(payload);
+  const withMeta = await attachDepartment(await attachUniversityMeta(payload), existing.departmentId);
   const updated = await Course.findOneAndUpdate(
     { _id: id, softDelete: false },
     withMeta,
     { returnDocument: "after", maxTimeMS: 5000 }
   );
 
-  return updated ? toRow(updated) : null;
+  return toRowWithDepartment(updated);
 }
 
 export async function deactivateCourse(id, updatedBy) {
@@ -178,7 +213,7 @@ export async function deactivateCourse(id, updatedBy) {
     { returnDocument: "after", maxTimeMS: 5000 }
   );
 
-  return updated ? toRow(updated) : null;
+  return toRowWithDepartment(updated);
 }
 
 export async function activateCourse(id, updatedBy) {
@@ -193,5 +228,5 @@ export async function activateCourse(id, updatedBy) {
     { returnDocument: "after", maxTimeMS: 5000 }
   );
 
-  return updated ? toRow(updated) : null;
+  return toRowWithDepartment(updated);
 }

@@ -11,6 +11,11 @@ import { Admission } from "../../models/Admission.js";
 import { reserveNextSequence } from "../../lib/sequence.js";
 import { createActivityLog } from "../activityLog/activityLog.service.js";
 import { emitSectionUpdate } from "../../lib/socket.js";
+import {
+  listDepartmentOptions,
+  releaseHodRole,
+  resolveDepartmentForLink,
+} from "../academicDepartments/academicDepartment.service.js";
 
 export const FACULTY_DESIGNATIONS = [
   "Trainer",
@@ -21,16 +26,6 @@ export const FACULTY_DESIGNATIONS = [
   "Head of Department",
   "Visiting Faculty",
   "Lab Instructor",
-];
-
-export const FACULTY_DEPARTMENTS = [
-  "Computer Science",
-  "Information Technology",
-  "Electronics",
-  "Mechanical",
-  "Management",
-  "Design",
-  "General",
 ];
 
 export const FACULTY_PERMISSIONS = [
@@ -117,6 +112,7 @@ function toRow(doc) {
     mobile: personal.mobile || "",
     email: personal.email || "",
     designation: employment.designation || "",
+    departmentId: employment.departmentId ? String(employment.departmentId) : "",
     department: employment.department || "",
     assignedCourses: Array.isArray(d.assignedCourses) ? d.assignedCourses : [],
     joiningDate: dateInputValue(employment.joiningDate),
@@ -145,6 +141,7 @@ function toEntry(doc, stats = null) {
     mobile: personal.mobile || "",
     email: personal.email || "",
     designation: employment.designation || "",
+    departmentId: employment.departmentId ? String(employment.departmentId) : "",
     department: employment.department || "",
     profilePhoto: personal.profilePhoto || "",
     joiningDate: dateInputValue(employment.joiningDate),
@@ -167,6 +164,7 @@ function toEntry(doc, stats = null) {
     },
     employmentDetails: {
       designation: employment.designation || "",
+      departmentId: employment.departmentId ? String(employment.departmentId) : "",
       department: employment.department || "",
       qualification: employment.qualification || "",
       specialization: employment.specialization || "",
@@ -272,6 +270,15 @@ export async function listFaculties(params = {}) {
 
   if (params.status) and.push({ status: params.status });
   if (params.designation) and.push({ "employmentDetails.designation": params.designation });
+  if (params.departmentId === "none") {
+    // Not linked to an academic department yet (legacy / unmigrated records)
+    and.push({ "employmentDetails.departmentId": { $not: { $type: "objectId" } } });
+  } else if (params.departmentId) {
+    const deptOid = asObjectId(params.departmentId);
+    // An invalid id must match nothing, not fall through to "unassigned".
+    and.push(deptOid ? { "employmentDetails.departmentId": deptOid } : { _id: { $in: [] } });
+  }
+  // Legacy free-text filter, kept for old bookmarked URLs
   if (params.department) and.push({ "employmentDetails.department": params.department });
 
   const search = String(params.search || "").trim();
@@ -284,6 +291,7 @@ export async function listFaculties(params = {}) {
         { "personalDetails.mobile": rx },
         { "personalDetails.email": rx },
         { "accountDetails.username": rx },
+        { "employmentDetails.department": rx },
       ],
     });
   }
@@ -341,15 +349,17 @@ export async function getFacultyStatsOverview() {
 export async function getFacultyMeta() {
   const [designations, departments] = await Promise.all([
     Faculty.distinct("employmentDetails.designation", { softDelete: false }),
-    Faculty.distinct("employmentDetails.department", { softDelete: false }),
+    // Live AcademicDepartment records ({ _id, name, code, status }) — no
+    // hardcoded list. Inactive ones are included so existing links still
+    // render; the form only offers Active ones for new selection.
+    listDepartmentOptions({ includeInactive: true }),
   ]);
 
   const designationSet = new Set([...FACULTY_DESIGNATIONS, ...designations.filter(Boolean)]);
-  const departmentSet = new Set([...FACULTY_DEPARTMENTS, ...departments.filter(Boolean)]);
 
   return {
     designations: [...designationSet].sort(),
-    departments: [...departmentSet].sort(),
+    departments,
     permissions: FACULTY_PERMISSIONS,
   };
 }
@@ -412,12 +422,17 @@ export async function createFaculty(payload, editor = "master-admin") {
     username: payload.accountDetails.loginEnabled ? payload.accountDetails.username : "",
   });
 
+  const dept = await resolveDepartmentForLink(payload.employmentDetails.departmentId);
   const passwordHash = payload.password ? await bcrypt.hash(payload.password, 10) : "";
 
   const doc = await Faculty.create({
     facultyId: await nextFacultyId(),
     personalDetails: payload.personalDetails,
-    employmentDetails: payload.employmentDetails,
+    employmentDetails: {
+      ...payload.employmentDetails,
+      departmentId: dept?._id || null,
+      department: dept?.name || "",
+    },
     accountDetails: {
       loginEnabled: payload.accountDetails.loginEnabled,
       username: payload.accountDetails.loginEnabled ? payload.accountDetails.username : "",
@@ -459,8 +474,21 @@ export async function updateFaculty(id, payload, editor = "master-admin") {
     excludeId: doc._id,
   });
 
+  const currentDeptId = doc.employmentDetails?.departmentId ? String(doc.employmentDetails.departmentId) : null;
+  const dept = await resolveDepartmentForLink(payload.employmentDetails.departmentId, {
+    currentDepartmentId: currentDeptId,
+  });
+  const nextDeptId = dept ? String(dept._id) : null;
+  // Unlinked legacy records keep their old free-text department until a real
+  // department is chosen; clearing a real link clears the name too.
+  const departmentName = dept ? dept.name : currentDeptId ? "" : doc.employmentDetails?.department || "";
+
   doc.personalDetails = payload.personalDetails;
-  doc.employmentDetails = payload.employmentDetails;
+  doc.employmentDetails = {
+    ...payload.employmentDetails,
+    departmentId: dept?._id || null,
+    department: departmentName,
+  };
   doc.accountDetails.loginEnabled = payload.accountDetails.loginEnabled;
   doc.accountDetails.username = payload.accountDetails.loginEnabled ? payload.accountDetails.username : "";
   // Only rehash when a new password was actually submitted — never touch the
@@ -472,6 +500,12 @@ export async function updateFaculty(id, payload, editor = "master-admin") {
   doc.permissions = payload.permissions;
   doc.updatedBy = editor;
   await doc.save();
+
+  if (currentDeptId && currentDeptId !== nextDeptId) {
+    await releaseHodRole(doc._id, { keepDepartmentId: nextDeptId, editor, reason: `${doc.personalDetails.fullName} moved department` });
+  } else if (doc.status !== "Active") {
+    await releaseHodRole(doc._id, { editor, reason: `${doc.personalDetails.fullName} is inactive` });
+  }
 
   await createActivityLog({
     section: "Faculty",
@@ -501,6 +535,10 @@ export async function updateFacultyStatus(id, status, editor = "master-admin") {
   doc.updatedBy = editor;
   await doc.save();
 
+  if (status !== "Active") {
+    await releaseHodRole(doc._id, { editor, reason: `${doc.personalDetails.fullName} is inactive` });
+  }
+
   await createActivityLog({
     section: "Faculty",
     action: "update",
@@ -522,6 +560,8 @@ export async function deleteFaculty(id, editor = "master-admin") {
   doc.accountDetails.loginEnabled = false;
   doc.updatedBy = editor;
   await doc.save();
+
+  await releaseHodRole(doc._id, { editor, reason: `${doc.personalDetails.fullName} archived` });
 
   await createActivityLog({
     section: "Faculty",

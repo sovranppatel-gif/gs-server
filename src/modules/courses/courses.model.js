@@ -49,6 +49,13 @@ const courseSchema = new mongoose.Schema(
       index: true,
     },
     universityName: { type: String, trim: true, default: "" },
+    // Owning academic department (Department → Course → Batch/Admission).
+    // Students are attributed to a department through this link.
+    departmentId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "AcademicDepartment",
+      default: null,
+    },
     universityShortName: { type: String, trim: true, uppercase: true, default: "" },
     category: {
       type: String,
@@ -86,5 +93,6 @@ courseSchema.index({ softDelete: 1, name: 1 });
 courseSchema.index({ softDelete: 1, code: 1 });
 courseSchema.index({ softDelete: 1, type: 1, status: 1 });
 courseSchema.index({ softDelete: 1, universityId: 1 });
+courseSchema.index({ softDelete: 1, departmentId: 1 });
 
 export const Course = mongoose.model("Course", courseSchema);

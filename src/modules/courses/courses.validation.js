@@ -86,7 +86,7 @@ export function normalizeCoursePayload(raw = {}) {
   const semesterCount =
     toNumber(raw.semesterCount, 0) || semesters.length || 0;
 
-  return {
+  const payload = {
     name: normalizeString(raw.name),
     code: normalizeString(raw.code).toUpperCase(),
     type: normalizeString(raw.type || "University") || "University",
@@ -106,6 +106,12 @@ export function normalizeCoursePayload(raw = {}) {
     status: normalizeString(raw.status || "Active") || "Active",
     remarks: normalizeString(raw.remarks),
   };
+  // Only touch the department link when the client actually sent the field,
+  // so an older client's full-document PUT never silently unlinks a course.
+  if (Object.prototype.hasOwnProperty.call(raw, "departmentId")) {
+    payload.departmentId = normalizeString(raw.departmentId) || null;
+  }
+  return payload;
 }
 
 export function validateCoursePayload(payload) {

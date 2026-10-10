@@ -27,6 +27,7 @@ export async function getFacultiesController(req, res) {
       status: req.query.status,
       designation: req.query.designation,
       department: req.query.department,
+      departmentId: req.query.departmentId,
       universityId: req.query.universityId,
       courseId: req.query.courseId,
       export: req.query.export,

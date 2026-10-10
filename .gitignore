@@ -14,3 +14,6 @@ uploads/
 .DS_Store
 .idea/
 .vscode/
+
+# Migration backups (may contain personal data)
+backups/

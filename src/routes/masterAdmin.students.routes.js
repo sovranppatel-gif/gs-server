@@ -2,6 +2,9 @@ import { Router } from "express";
 import mongoose from "mongoose";
 import { Admission } from "../models/Admission.js";
 import { requireMasterAdminJwt } from "../middleware/requireMasterAdminJwt.js";
+import { Course } from "../modules/courses/courses.model.js";
+import { AcademicDepartment } from "../modules/academicDepartments/academicDepartment.model.js";
+import { buildDepartmentStudentFilter } from "../modules/academicDepartments/academicDepartment.service.js";
 
 const router = Router();
 
@@ -36,6 +39,53 @@ function toListRow(doc) {
     status: d.status || "",
     admissionDate: d.admissionDate || d.createdAt || null,
     details: slimDetails(d.details),
+  };
+}
+
+/** Department is derived Admission → Course → AcademicDepartment (never
+ * stored on the admission). Matches by details.courseId, falling back to the
+ * course name for legacy rows without an id (only when that name is unique
+ * in the catalog). Returns a function admission → dept info | null. */
+async function departmentResolverFor(admissions) {
+  const ids = new Set();
+  const names = new Set();
+  for (const a of admissions) {
+    const cid = String(a.details?.courseId || "");
+    if (mongoose.Types.ObjectId.isValid(cid)) ids.add(cid);
+    else if (a.course) names.add(String(a.course).trim().toLowerCase());
+  }
+  if (!ids.size && !names.size) return () => null;
+
+  const nameRegexes = [...names].map((n) => new RegExp(`^\\s*${escapeRegex(n)}\\s*$`, "i"));
+  const or = [];
+  if (ids.size) or.push({ _id: { $in: [...ids] } });
+  if (nameRegexes.length) or.push({ name: { $in: nameRegexes } });
+  const courses = await Course.find({ softDelete: false, $or: or }).select("name departmentId").lean();
+
+  const deptIds = courses.map((c) => c.departmentId).filter(Boolean);
+  const depts = deptIds.length
+    ? await AcademicDepartment.find({ _id: { $in: deptIds } }).select("name code").lean()
+    : [];
+  const deptById = new Map(depts.map((d) => [String(d._id), d]));
+  const info = (deptId) => {
+    const d = deptId ? deptById.get(String(deptId)) : null;
+    return d ? { departmentId: String(d._id), departmentName: d.name, departmentCode: d.code } : null;
+  };
+
+  const byCourseId = new Map(courses.map((c) => [String(c._id), info(c.departmentId)]));
+  const byName = new Map();
+  const ambiguous = new Set();
+  for (const c of courses) {
+    const key = String(c.name || "").trim().toLowerCase();
+    if (byName.has(key)) ambiguous.add(key);
+    byName.set(key, info(c.departmentId));
+  }
+  for (const key of ambiguous) byName.delete(key);
+
+  return (a) => {
+    const cid = String(a.details?.courseId || "");
+    if (cid) return byCourseId.get(cid) || null;
+    return byName.get(String(a.course || "").trim().toLowerCase()) || null;
   };
 }
 
@@ -75,6 +125,13 @@ router.get("/", async (req, res) => {
     if (req.query.term) q.push({ $or: [{ "details.currentSemester": Number(req.query.term) }, { "details.semester": Number(req.query.term) }] });
     if (req.query.gender) q.push({ "details.gender": String(req.query.gender).trim() });
     if (req.query.category) q.push({ "details.category": String(req.query.category).trim() });
+    if (req.query.departmentId) {
+      const deptFilter = await buildDepartmentStudentFilter(String(req.query.departmentId));
+      // No courses linked (or invalid id) → the department has no students.
+      // Archived admissions are not department students, matching the
+      // counts on the Academic Department pages.
+      q.push(deptFilter ? { ...deptFilter, softDelete: { $ne: true } } : { _id: { $in: [] } });
+    }
 
     const filter = q.length ? { $and: q } : {};
 
@@ -102,7 +159,12 @@ router.get("/", async (req, res) => {
         .maxTimeMS(12000),
     ]);
 
-    const items = docs.map(toListRow);
+    const resolveDept = await departmentResolverFor(docs);
+    const items = docs.map((d) => {
+      const row = toListRow(d);
+      const dept = resolveDept(d);
+      return { ...row, departmentId: dept?.departmentId || "", departmentName: dept?.departmentName || "" };
+    });
     return res.json({ success: true, items, total, page, limit, totalPages: Math.ceil(total / limit) });
   } catch (err) {
     console.error("master-admin students list error:", err);
@@ -117,14 +179,14 @@ router.get("/stats", async (req, res) => {
     const byStatusAgg = await Admission.aggregate([
       { $group: { _id: "$status", count: { $sum: 1 } } },
       { $project: { _id: 0, status: "$_id", count: 1 } },
-    ]).maxTimeMS(8000);
+    ]).option({ maxTimeMS: 8000 });
 
     const byCourseAgg = await Admission.aggregate([
       { $group: { _id: "$details.courseId", count: { $sum: 1 } } },
       { $project: { _id: 0, courseId: "$_id", count: 1 } },
       { $sort: { count: -1 } },
       { $limit: 10 },
-    ]).maxTimeMS(8000);
+    ]).option({ maxTimeMS: 8000 });
 
     return res.json({ success: true, total, byStatus: byStatusAgg, byCourse: byCourseAgg });
   } catch (err) {
@@ -162,6 +224,9 @@ router.get("/:id", async (req, res) => {
       updatedAt: entry.updatedAt,
       details,
     };
+    const dept = (await departmentResolverFor([entry]))(entry);
+    out.departmentId = dept?.departmentId || "";
+    out.departmentName = dept?.departmentName || "";
     return res.json({ success: true, entry: out });
   } catch (err) {
     console.error("master-admin student get error:", err);

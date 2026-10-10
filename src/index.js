@@ -26,6 +26,7 @@ import attendanceRoutes from "./modules/attendance/attendance.routes.js";
 import batchesRoutes from "./modules/batches/batches.routes.js";
 import facultiesRoutes from "./modules/faculties/faculty.routes.js";
 import staffRoutes from "./modules/staff/staff.routes.js";
+import academicDepartmentRoutes from "./modules/academicDepartments/academicDepartment.routes.js";
 import activityLogRoutes from "./modules/activityLog/activityLog.routes.js";
 import masterAdminStudentsRoutes from "./routes/masterAdmin.students.routes.js";
 import workshopRoutes from "./modules/workshop/workshop.routes.js";
@@ -149,6 +150,8 @@ app.use("/api/attendance", attendanceRoutes);
 app.use("/api/batches", batchesRoutes);
 app.use("/api/faculties", facultiesRoutes);
 app.use("/api/staff", staffRoutes);
+// Academic (teaching) departments — separate from /api/staff/departments
+app.use("/api/academic-departments", academicDepartmentRoutes);
 app.use("/api/activity-logs", activityLogRoutes);
 app.use("/api/master-admin/students", masterAdminStudentsRoutes);
 app.use("/api/workshop-registrations", workshopRoutes);

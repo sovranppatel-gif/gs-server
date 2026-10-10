@@ -26,7 +26,8 @@ export async function getCoursesController(req, res) {
     const status = String(req.query.status || "").trim();
     const type = String(req.query.type || "").trim();
     const universityId = String(req.query.universityId || "").trim();
-    const data = await listCourses({ search, status, type, universityId });
+    const departmentId = String(req.query.departmentId || "").trim();
+    const data = await listCourses({ search, status, type, universityId, departmentId });
     return res.json({
       success: true,
       message: "Courses fetched",

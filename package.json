@@ -11,7 +11,8 @@
     "migrate:atlas": "node src/scripts/migrateToAtlas.js",
     "seed": "node src/scripts/runSeeds.js",
     "backfill:universities": "node src/scripts/backfillUniversityNormalized.js",
-    "backfill:admissions": "node src/scripts/backfillAdmissionSoftDelete.js"
+    "backfill:admissions": "node src/scripts/backfillAdmissionSoftDelete.js",
+    "migrate:academic-departments": "node src/scripts/migrateAcademicDepartments.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
