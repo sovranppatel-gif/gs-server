@@ -28,6 +28,7 @@ export function resolveWhatsappEnv(source = process.env) {
     whatsappConfigErrors: errors,
     whatsappWebhookUrl: value('WHATSAPP_WEBHOOK_URL'),
     whatsappAutoReplyEnabled: value('WHATSAPP_AUTO_REPLY_ENABLED').toLowerCase() !== 'false',
+    whatsappAutoReplyConfigured: Boolean(value('WHATSAPP_AUTO_REPLY_ENABLED')),
     whatsappBusinessTimezone: value('WHATSAPP_BUSINESS_TIMEZONE') || 'Asia/Kolkata',
     whatsappSendTimeoutMs: Math.max(1000, number('WHATSAPP_SEND_TIMEOUT_MS', 15000, 30000)),
     whatsappMaxRetries: Math.floor(number('WHATSAPP_MAX_RETRIES', 3, 5)),

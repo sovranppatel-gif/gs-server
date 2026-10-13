@@ -7,6 +7,8 @@ import { WhatsAppTemplate } from "./models/whatsappTemplate.model.js";
 import { WhatsAppMessage } from "./models/whatsappMessage.model.js";
 import { WhatsAppConversation } from "./models/whatsappConversation.model.js";
 import { WhatsAppWebhookEvent } from "./models/whatsappWebhookEvent.model.js";
+import { WhatsAppAutomation } from "./models/whatsappAutomation.model.js";
+import { getBotDiagnostics, getWorkerDiagnostics } from "./whatsapp.diagnostics.js";
 import { getConnectionStatus, isDryRun } from "./whatsapp.config.js";
 import { checkPhoneNumber } from "./whatsapp.client.js";
 import { findOrCreateContact } from "./services/contact.service.js";
@@ -31,7 +33,7 @@ export async function getOverviewStatus(masterAdmin) {
 }
 
 export async function getSettingsView(masterAdmin) {
-  const [settings, lastEvent, incoming, lastReply, failedReply, pending, failed] = await Promise.all([
+  const [settings, lastEvent, incoming, lastReply, failedReply, pending, failed, enabledAutomations] = await Promise.all([
     getSettings(),
     WhatsAppWebhookEvent.findOne({ simulated: false }).sort({ receivedAt: -1 }).select('receivedAt eventType status').lean(),
     WhatsAppMessage.findOne({ direction: 'inbound', simulatedInbound: { $ne: true }, providerMessageId: { $not: /^wamid\.SIM\./ } }).sort({ timestamp: -1 }).select('timestamp').lean(),
@@ -39,22 +41,32 @@ export async function getSettingsView(masterAdmin) {
     WhatsAppMessage.findOne({ origin: 'automation', dryRun: false, status: 'failed' }).sort({ failedAt: -1 }).select('failedAt error').lean(),
     WhatsAppWebhookEvent.countDocuments({ status: { $in: ['received', 'processing'] } }),
     WhatsAppWebhookEvent.countDocuments({ status: 'failed' }),
+    WhatsAppAutomation.countDocuments({ enabled: true }),
   ]);
   const connection = getConnectionStatus();
   const recentTest = settings.connectionTest;
   const validated = recentTest?.ok && recentTest.phoneNumberId === env.whatsappPhoneNumberId && Date.now() - new Date(recentTest.testedAt).getTime() < 15 * 60 * 1000;
   if (connection.canSendLive) connection.readiness = validated ? 'API_VALIDATED' : 'UNVERIFIED';
+  const bot = getBotDiagnostics(settings, env, enabledAutomations);
+  const worker = getWorkerDiagnostics(settings, getWorkerState(), {
+    serverless: connection.runtime === 'serverless', cronConfigured: Boolean(env.cronSecret),
+  });
   return {
     connection,
-    webhook: { lastRealEventAt: lastEvent?.receivedAt || null, lastEventType: lastEvent?.eventType || '', verifyTokenConfigured: Boolean(env.whatsappVerifyToken) },
+    webhook: {
+      lastRealEventAt: lastEvent?.receivedAt || null, lastEventType: lastEvent?.eventType || '',
+      verifyTokenConfigured: Boolean(env.whatsappVerifyToken), appSecretConfigured: Boolean(env.whatsappAppSecret),
+      signatureRequired: true,
+    },
     diagnostics: {
       lastIncomingAt: incoming?.timestamp || null,
       lastAutoReplyAcceptedAt: lastReply?.acceptedAt || null,
       lastFailedReplyAt: failedReply?.failedAt || null,
       lastReplyError: failedReply?.error || null,
-      botEnabled: Boolean(settings.autoReplyEnabled && env.whatsappAutoReplyEnabled),
+      botEnabled: bot.enabled,
+      bot,
       pendingEvents: pending, failedEvents: failed,
-      worker: { ...getWorkerState(), lastTickAt: settings.workerLastTickAt, lastCompletedAt: settings.workerLastCompletedAt, lastError: settings.workerLastError },
+      worker: { ...worker, lastError: worker.lastError ? safeError(worker.lastError) : '' },
       connectionTest: recentTest || null,
     },
     settings: Object.fromEntries(Object.entries(settings).filter(([key]) => !['workerLeaseToken', 'workerLockedUntil'].includes(key))), permissions: permissionsFor(masterAdmin),

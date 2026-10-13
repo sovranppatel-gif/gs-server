@@ -12,6 +12,7 @@ Object.assign(process.env, {
   WHATSAPP_PHONE_NUMBER_ID: '100001', WHATSAPP_BUSINESS_ACCOUNT_ID: '200001',
   WHATSAPP_VERIFY_TOKEN: 'TEST_ONLY_VERIFY', META_GRAPH_API_VERSION: 'v26.0',
   WHATSAPP_WEBHOOK_URL: 'https://api.example.test/api/whatsapp/webhook',
+  WHATSAPP_AUTO_REPLY_ENABLED: 'true', CRON_SECRET: 'TEST_ONLY_CRON_SECRET',
   JWT_SECRET: 'TEST_ONLY_JWT_SECRET_MORE_THAN_32_CHARACTERS',
   MONGOMS_DOWNLOAD_DIR: `${process.cwd()}/.cache/mongodb`,
 });
@@ -367,6 +368,85 @@ test('shared callback updates matching Workshop delivery status without running 
   assert.equal(await messages.applyStatusUpdate({ id: 'wamid.WORKSHOP_MOCK', status: 'delivered' }), 'processed');
   assert.equal((await WorkshopMessage.findById(workshop._id)).recipients[0].status, 'delivered');
   assert.equal(await Message.countDocuments(), 0);
+});
+
+test('settings explains deployment kill switch even with saved replies and enabled automations', async () => {
+  env.whatsappAutoReplyEnabled = false;
+  const { getSettingsView } = await import('../src/modules/whatsapp/whatsapp.service.js');
+  const view = await getSettingsView({});
+  assert.equal(view.settings.autoReplyEnabled, true);
+  assert.ok(view.diagnostics.bot.enabledAutomations > 0);
+  assert.equal(view.diagnostics.botEnabled, false);
+  assert.equal(view.diagnostics.bot.environmentEnabled, false);
+  assert.match(view.diagnostics.bot.reasons.join(' '), /WHATSAPP_AUTO_REPLY_ENABLED/);
+  await inbound('Hi');
+  assert.equal(await Message.countDocuments({ direction: 'inbound' }), 1);
+  assert.equal(await Message.countDocuments({ direction: 'outbound' }), 0);
+});
+
+test('saved disabled setting stays disabled even when the environment allows the bot', async () => {
+  await Settings.updateOne({ key: 'default' }, { $set: { autoReplyEnabled: false } });
+  const { getSettingsView } = await import('../src/modules/whatsapp/whatsapp.service.js');
+  const view = await getSettingsView({});
+  assert.equal(view.diagnostics.botEnabled, false);
+  assert.equal(view.diagnostics.bot.environmentEnabled, true);
+  assert.match(view.diagnostics.bot.reasons.join(' '), /saved WhatsApp settings/);
+  assert.equal((await Settings.findOne({ key: 'default' }).lean()).autoReplyEnabled, false);
+});
+
+test('settings created with environment disabled require an explicit saved enable later', async () => {
+  await Settings.deleteMany({}); env.whatsappAutoReplyEnabled = false;
+  assert.equal((await getSettings()).autoReplyEnabled, false);
+  env.whatsappAutoReplyEnabled = true;
+  assert.equal((await getSettings()).autoReplyEnabled, false);
+  const { updateSettings } = await import('../src/modules/whatsapp/services/settings.service.js');
+  await updateSettings({ autoReplyEnabled: true });
+  await inbound('Hi'); assert.equal(await Message.countDocuments({ direction: 'outbound' }), 1);
+});
+
+test('legacy missing saved flag is diagnosed without silently enabling replies', async () => {
+  await Settings.updateOne({ key: 'default' }, { $unset: { autoReplyEnabled: '' } });
+  const { getSettingsView } = await import('../src/modules/whatsapp/whatsapp.service.js');
+  const view = await getSettingsView({});
+  assert.equal(view.diagnostics.botEnabled, false);
+  assert.equal(view.diagnostics.bot.savedAutoReplyEnabled, null);
+  assert.match(view.diagnostics.bot.reasons.join(' '), /missing/);
+  await inbound('Hi'); assert.equal(await Message.countDocuments({ direction: 'outbound' }), 0);
+});
+
+test('turning environment switch off blocks an already queued automation reply', async () => {
+  await inbound('Hi'); env.whatsappAutoReplyEnabled = false;
+  await messages.dispatchDueMessages();
+  assert.equal((await Message.findOne({ direction: 'outbound' })).error.code, 'BOT_PAUSED');
+});
+
+test('missing app secret blocks webhook while enabled bot controls remain accurately reported', async () => {
+  env.whatsappAppSecret = '';
+  const { getSettingsView } = await import('../src/modules/whatsapp/whatsapp.service.js');
+  const view = await getSettingsView({});
+  assert.equal(view.diagnostics.botEnabled, true);
+  assert.equal(view.webhook.signatureRequired, true); assert.equal(view.webhook.appSecretConfigured, false);
+  assert.match(view.connection.signatureVerification, /blocking/);
+  assert.equal((await post(payload(), null)).status, 503);
+});
+
+test('serverless settings use persisted worker heartbeat without requiring an interval', async () => {
+  const previousVercel = process.env.VERCEL; process.env.VERCEL = '1';
+  try {
+    const { getSettingsView } = await import('../src/modules/whatsapp/whatsapp.service.js');
+    let view = await getSettingsView({});
+    assert.equal(view.diagnostics.botEnabled, true);
+    assert.equal(view.diagnostics.worker.strategy, 'cron');
+    assert.equal(view.diagnostics.worker.running, false);
+    assert.equal(view.diagnostics.worker.status, 'no_heartbeat');
+    const { runWorkerTick } = await import('../src/modules/whatsapp/services/worker.service.js');
+    await runWorkerTick({ maxCampaignSends: 0 });
+    view = await getSettingsView({});
+    assert.equal(view.diagnostics.worker.status, 'recent_tick');
+    assert.ok(view.diagnostics.worker.lastCompletedAt);
+  } finally {
+    if (previousVercel === undefined) delete process.env.VERCEL; else process.env.VERCEL = previousVercel;
+  }
 });
 
 test('actual Express entry verifies with real MongoDB connected and disconnected', async () => {

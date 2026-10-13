@@ -13,7 +13,7 @@
     "backfill:universities": "node src/scripts/backfillUniversityNormalized.js",
     "backfill:admissions": "node src/scripts/backfillAdmissionSoftDelete.js",
     "migrate:academic-departments": "node src/scripts/migrateAcademicDepartments.js",
-    "test:whatsapp": "node --test --test-concurrency=1 tests/whatsapp.production.test.js"
+    "test:whatsapp": "node --test --test-concurrency=1 tests/whatsapp.production.test.js tests/whatsapp.verification.test.js tests/whatsapp.diagnostics.test.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

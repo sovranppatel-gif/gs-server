@@ -89,7 +89,7 @@ set to live/false for this task, so incomplete configuration reports NOT_READY.
 | `WHATSAPP_WEBHOOK_URL` | Fill manually: exact deployed HTTPS backend URL ending `/api/whatsapp/webhook` |
 | `WHATSAPP_MODE` | `live` or `dry_run` |
 | `WHATSAPP_DRY_RUN` | `false` with live; `true` with dry_run; contradictory values fail closed |
-| `WHATSAPP_AUTO_REPLY_ENABLED` | Environment kill switch; saved admin settings take precedence when false |
+| `WHATSAPP_AUTO_REPLY_ENABLED` | Environment kill switch; this switch AND saved `autoReplyEnabled` must allow replies |
 | `WHATSAPP_BUSINESS_TIMEZONE` | Default for new settings: `Asia/Kolkata`; saved business hours remain authoritative |
 | `WHATSAPP_SEND_TIMEOUT_MS` | Default 15000; bounded HTTP timeout |
 | `WHATSAPP_MAX_RETRIES` | Default 3 additional attempts, only for explicit retryable rejection |
@@ -178,12 +178,72 @@ For immediate conversational responses prefer a persistent worker/VPS. If using 
 external scheduler, call the authenticated cron endpoint without exposing its secret.
 No persistent setInterval is started on Vercel. Cron leases prevent overlapping queue ticks.
 
+## Diagnosing Bot: Disabled
+
+`GET /api/whatsapp/settings` is authenticated with the existing Master Admin JWT and
+WhatsApp view permission. It reads the singleton `whatsapp_settings` record and the
+environment loaded by the deployed backend. The effective bot control is:
+
+```text
+saved autoReplyEnabled AND environment WHATSAPP_AUTO_REPLY_ENABLED
+```
+
+Enabled automation documents do not override either switch. The same controls are
+checked before automation execution and again before dispatching an automatic reply.
+Changing the checkbox without saving does not change the effective bot control.
+For a new settings record the saved flag defaults to the environment switch. If that
+record was created while the environment disabled replies, enabling the environment
+later does not overwrite the saved false value. Save the intended setting explicitly.
+Legacy records with a missing flag remain disabled until an administrator saves it.
+
+Settings diagnostics now show both switches, an explicit disable reason, the enabled
+automation count and worker status. An older response without bot diagnostics no longer
+implicitly renders Disabled: known flags can be used, otherwise it shows Unavailable.
+Bot enabled means its controls allow automation, not that Meta delivery is verified.
+Worker status separately reports missing cron secret, no heartbeat, stale heartbeat,
+last worker error, stopped interval or a recent tick. A recent tick can be manual and
+does not prove the cron schedule or successful message delivery.
+
+The public GET webhook handshake only checks `WHATSAPP_VERIFY_TOKEN`. Incoming POST
+requires HMAC-SHA256 over original request bytes with `WHATSAPP_APP_SECRET` in every
+environment, then durable MongoDB event acceptance. A missing secret rejects POST with
+503; an invalid/missing signature returns 401. Successful GET verification does not
+validate POST signatures, WABA subscription, chatbot execution or the sender token.
+
+Deployment checklist for the backend Vercel project's **Production** environment:
+
+- Set `WHATSAPP_AUTO_REPLY_ENABLED=true`, `WHATSAPP_MODE=live`, `WHATSAPP_DRY_RUN=false`.
+- Preserve valid `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`,
+  `WHATSAPP_BUSINESS_ACCOUNT_ID`, `WHATSAPP_APP_SECRET`, `WHATSAPP_VERIFY_TOKEN`
+  and `META_GRAPH_API_VERSION`. App Secret must belong to the app sending the webhook;
+  it is different from the verify token. Do not paste secret values into diagnostic logs.
+- Set `WHATSAPP_WEBHOOK_URL=https://gs-server-woad.vercel.app/api/whatsapp/webhook`.
+- Configure `CRON_SECRET` and verify `/api/whatsapp/cron/tick` executes every minute.
+  Vercel Hobby allows only daily cron and rejects more frequent expressions; Pro and
+  Enterprise allow every minute. If using an external scheduler instead, remove the
+  incompatible Vercel cron declaration as part of that deployment's configuration.
+- After an approved deployment, save Auto replies enabled in Settings; confirm both
+  controls, intended automations, signature configuration and a recent worker tick.
+- Check the frontend build's `VITE_API_BASE_URL` targets this backend host without a
+  trailing `/api`, since the WhatsApp client adds `/api/whatsapp` itself.
+
+Local `.env` does not update Vercel configuration; dotenv also preserves already-set
+process environment values. Changes in Vercel variables apply only to new deployments.
+Restart the local API after editing `.env`; `npm run dev` watches `src`, and does not
+reload `.env` automatically. The Settings API row shows the actual browser request URL;
+in Vite development this can use a same-origin proxy to the local API. A Vercel callback
+URL in backend configuration does not make the admin API use the deployed backend.
+Redeploy backend and frontend code only after approval. See
+[Vercel environment variables](https://vercel.com/docs/environment-variables) and
+[Vercel cron limits](https://vercel.com/docs/cron-jobs/usage-and-pricing).
+
 ## Tests and live acceptance
 
 ```sh
 npm ci --ignore-scripts
 npm run test:whatsapp
 # From gs-frontend:
+node --test tests/whatsapp.diagnostics.test.js
 npm run build
 ```
 
@@ -224,6 +284,7 @@ heartbeat, pending/failed jobs and redacted errors. Dry-run statuses remain labe
 | POST 503 | Missing app secret or unavailable DB |
 | No incoming events | WABA subscribed_apps, messages field, phone identity, HTTPS/proxy |
 | Received but no reply | Worker/cron heartbeat, event failures, replica set, bot setting, handover, opt-out |
+| Bot disabled despite enabled automations | Saved auto-reply flag AND deployed environment switch; save checkbox changes; update older backend diagnostics |
 | NOT_READY | Missing/contradictory environment values; credentials do not imply API validation |
 | Error 190 | Invalid/expired/revoked token or incorrect app/asset permissions |
 | 131026 | Recipient not reachable/eligible; inspect authenticated error details |
@@ -244,14 +305,18 @@ timeouts. Reverting to unsafe sending code is not a safe way to recover unknown 
 
 ## Current validation boundaries
 
-Local validation on 2026-10-13: 42/42 production tests passed against an isolated MongoDB
-8.0 replica set with mocked Meta requests; frontend production build passed (existing
-large-bundle warning); backend import and syntax checks passed; updated dependency audit
-reported zero vulnerabilities. Campaign controls and Workshop delivery-status forwarding
-are covered. No customer database was used for tests and no real email/WhatsApp message was sent.
+Local validation on 2026-10-13: 92/92 backend tests (production flow, verification and
+diagnostics) passed against an isolated MongoDB 8.0 replica set with mocked Meta requests;
+6/6 frontend bot-status tests passed; the frontend production build passed with its
+existing large-bundle warning. Campaign controls, signature rejection, both bot
+switches, legacy missing settings, queued-reply pause, serverless heartbeat and Workshop
+delivery-status forwarding are covered. No customer database was used for tests and no
+real email/WhatsApp message was sent.
 
-No real
-Meta API send, live inbound webhook, production restart or deployment was performed:
-essential local credentials and exact backend URL are missing, and no authenticated
-deployment project is available. Complete the live checklist before treating this as a
-verified production integration.
+Local configuration permits live auto replies and essential credential keys are set,
+but presence does not validate their values. Read-only access to the configured database
+was unavailable from this workspace (connection timeout/refusal); it did not establish
+an authentication problem. The deployed saved bot flag, Vercel environment and actual
+Meta delivery remain unverified. No live Meta requests, inbound acceptance test,
+deployment or production data changes were performed. Complete the live checklist only
+with explicit approval before treating this as a verified production integration.

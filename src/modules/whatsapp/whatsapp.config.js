@@ -75,10 +75,8 @@ export function getConnectionStatus() {
       appSecret: env.whatsappAppSecret ? "Configured" : "Not Configured",
     },
     signatureVerification: env.whatsappAppSecret
-      ? "enabled"
-      : isProduction()
-        ? "blocking (app secret missing in production)"
-        : "disabled (development only)",
+      ? "required (HMAC-SHA256; app secret configured)"
+      : "blocking (WHATSAPP_APP_SECRET missing)",
     cronTick: env.cronSecret ? "Configured" : "Not Configured",
     runtime: process.env.VERCEL ? "serverless" : "server",
   };
