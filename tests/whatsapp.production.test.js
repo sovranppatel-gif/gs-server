@@ -108,6 +108,8 @@ test('valid HMAC accepted durably before chatbot work, preserving raw bytes', as
   const r = await post(payload()); assert.equal(r.status, 200);
   assert.equal(await Event.countDocuments({ status: 'received' }), 1);
   assert.equal(await Message.countDocuments(), 0);
+  const event = await Event.findOne().lean();
+  assert.equal(event.signatureVerified, true); assert.ok(event.signatureVerifiedAt);
 });
 test('invalid signature rejected, creates no event', async () => {
   assert.equal((await post(payload(), `sha256=${'0'.repeat(64)}`)).status, 401); assert.equal(await Event.countDocuments(), 0);
@@ -445,6 +447,94 @@ test('serverless settings use persisted worker heartbeat without requiring an in
     assert.equal(view.diagnostics.worker.status, 'recent_tick');
     assert.ok(view.diagnostics.worker.lastCompletedAt);
   } finally {
+    if (previousVercel === undefined) delete process.env.VERCEL; else process.env.VERCEL = previousVercel;
+  }
+});
+
+test('authenticated Settings GET returns the complete versioned contract without changing saved data', async () => {
+  const { signMasterAdminToken } = await import('../src/lib/jwt.js');
+  const token = signMasterAdminToken({ sub: 'test-only-admin', email: 'admin@example.test', name: 'Fixture' });
+  const before = await Settings.findOne({ key: 'default' }).lean();
+  const response = await originalFetch(`${base}/api/whatsapp/settings`, { headers: { Authorization: `Bearer ${token}` } });
+  assert.equal(response.status, 200); assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.equal(response.headers.get('x-whatsapp-diagnostics-version'), '2');
+  const body = await response.json(); assert.equal(body.success, true);
+  const data = body.data;
+  assert.equal(data.diagnostics.schemaVersion, 2);
+  assert.equal(data.diagnostics.bot.environmentEnabled, true); assert.equal(data.diagnostics.bot.savedAutoReplyEnabled, true);
+  assert.equal(data.connection.autoReplyAllowed, true); assert.ok(data.diagnostics.bot.enabledAutomations > 0);
+  assert.equal(data.diagnostics.configuration.autoReplyEnabled, true); assert.equal(data.diagnostics.configuration.dryRun, true);
+  assert.equal(data.diagnostics.configuration.mode, 'dry_run'); assert.equal(data.diagnostics.worker.status, 'stopped');
+  assert.equal(data.webhook.status, 'not_observed'); assert.equal(data.webhook.signatureEvidence, 'not_recorded');
+  assert.equal(data.diagnostics.coexistence.status, 'not_verified');
+  assert.equal('workerLeaseToken' in data.settings, false); assert.equal('workerLockedUntil' in data.settings, false);
+  assert.ok(!JSON.stringify(body).includes('TEST_ONLY_TOKEN')); assert.ok(!JSON.stringify(body).includes('TEST_ONLY_SECRET'));
+  assert.deepEqual(await Settings.findOne({ key: 'default' }).lean(), before);
+});
+
+test('Settings diagnostics do not create a missing saved record or imply saved Enabled', async () => {
+  await Settings.deleteMany({});
+  const { getSettingsView } = await import('../src/modules/whatsapp/whatsapp.service.js');
+  const data = await getSettingsView({});
+  assert.equal(await Settings.countDocuments(), 0);
+  assert.equal(data.settings.autoReplyEnabled, null); assert.equal(data.diagnostics.bot.status, 'unavailable');
+  assert.equal(data.diagnostics.botEnabled, false);
+});
+
+test('signed webhook acceptance, processing and real incoming evidence are distinguished', async () => {
+  const { getSettingsView } = await import('../src/modules/whatsapp/whatsapp.service.js');
+  assert.equal((await post(payload())).status, 200);
+  let data = await getSettingsView({});
+  assert.equal(data.webhook.signatureEvidence, 'verified_event_recorded');
+  assert.equal(data.webhook.lastMessageProcessingStatus, 'received'); assert.equal(data.diagnostics.lastIncomingAt, null);
+  assert.equal(data.webhook.realEventCounts.received, 1);
+  await webhook.reprocessStuckEvents();
+  data = await getSettingsView({}); assert.equal(data.webhook.lastMessageProcessingStatus, 'processed');
+  assert.ok(data.diagnostics.lastIncomingAt); assert.equal(data.webhook.realEventCounts.processed, 1);
+  assert.equal(data.diagnostics.lastAutoReplyAcceptedAt, null);
+});
+
+test('simulation cannot create real signed webhook evidence', async () => {
+  await webhook.ingestWebhook(payload(), { simulated: true, signatureVerified: true });
+  const { getSettingsView } = await import('../src/modules/whatsapp/whatsapp.service.js');
+  const data = await getSettingsView({});
+  assert.equal(data.webhook.status, 'not_observed'); assert.equal(data.webhook.lastSignedEventAt, null);
+  assert.equal((await Event.findOne()).signatureVerified, false);
+});
+
+test('authorized cron tick stores scheduled execution evidence without sending messages', async () => {
+  const response = await originalFetch(`${base}/api/whatsapp/cron/tick`, { headers: { Authorization: `Bearer ${env.cronSecret}` } });
+  assert.equal(response.status, 200);
+  const saved = await Settings.findOne().lean();
+  assert.equal(saved.workerLastTrigger, 'cron'); assert.ok(saved.workerLastCronTickAt); assert.ok(saved.workerLastCronCompletedAt);
+  assert.equal(await Message.countDocuments(), 0);
+});
+
+test('Business App echoes and history never trigger inbound chatbot automations', async () => {
+  for (const field of ['smb_message_echoes', 'history', 'smb_app_state_sync']) {
+    const body = payload(); body.entry[0].changes[0].field = field;
+    assert.equal((await webhook.ingestWebhook(body)).received, 0);
+  }
+  assert.equal(await Message.countDocuments(), 0); assert.equal(await Event.countDocuments(), 0);
+});
+
+test('Vercel adapter Settings GET skips seeding and still requires JWT', async () => {
+  const previousVercel = process.env.VERCEL; process.env.VERCEL = '1';
+  const { signMasterAdminToken } = await import('../src/lib/jwt.js');
+  const token = signMasterAdminToken({ sub: 'fixture', email: 'admin@example.test', name: 'Fixture' });
+  const { default: adapter } = await import('../api/index.js');
+  const wrapper = express(); wrapper.use(adapter);
+  const adapterServer = wrapper.listen(0, '127.0.0.1');
+  await new Promise((resolve) => adapterServer.once('listening', resolve));
+  const url = `http://127.0.0.1:${adapterServer.address().port}/api/whatsapp/settings`;
+  try {
+    await Settings.deleteMany({});
+    assert.equal((await originalFetch(url)).status, 401);
+    const response = await originalFetch(`${url}?fixture=1`, { headers: { Authorization: `Bearer ${token}` } });
+    assert.equal(response.status, 200); assert.equal((await response.json()).data.diagnostics.schemaVersion, 2);
+    assert.equal(await Settings.countDocuments(), 0);
+  } finally {
+    await new Promise((resolve) => adapterServer.close(resolve));
     if (previousVercel === undefined) delete process.env.VERCEL; else process.env.VERCEL = previousVercel;
   }
 });

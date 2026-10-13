@@ -32,6 +32,9 @@ const whatsappSettingsSchema = new mongoose.Schema(
     workerLeaseToken: { type: String, default: '' },
     workerLockedUntil: { type: Date, default: null },
     workerLastCompletedAt: { type: Date, default: null },
+    workerLastTrigger: { type: String, enum: ['unknown', 'cron', 'admin', 'interval', 'simulation'], default: 'unknown' },
+    workerLastCronTickAt: { type: Date, default: null },
+    workerLastCronCompletedAt: { type: Date, default: null },
     workerLastError: { type: String, default: '' },
     connectionTest: {
       testedAt: { type: Date, default: null },

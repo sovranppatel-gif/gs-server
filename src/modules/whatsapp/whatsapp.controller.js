@@ -55,7 +55,7 @@ export async function webhookReceive(req, res) {
     return res.sendStatus(400);
   }
   try {
-    await ingestWebhook(body);
+    await ingestWebhook(body, { signatureVerified: true });
     return res.sendStatus(200);
   } catch (err) {
     // Persisting failed (e.g. DB down) → non-200 so Meta redelivers later
@@ -70,7 +70,7 @@ export async function cronTick(req, res) {
   const [type, token] = String(req.headers.authorization || "").split(" ");
   if (type !== "Bearer" || !safeEqual(token, env.cronSecret)) return res.status(401).json({ success: false, message: "Unauthorized" });
   try {
-    const result = await runWorkerTick({ maxCampaignSends: 40, deadline: Date.now() + 40000 });
+    const result = await runWorkerTick({ maxCampaignSends: 40, deadline: Date.now() + 40000, trigger: 'cron' });
     return res.json({ success: true, data: result });
   } catch (err) {
     console.error("[whatsapp] cron tick failed:", safeError(err));
@@ -80,12 +80,16 @@ export async function cronTick(req, res) {
 
 // Overview / settings -----------------------------------------------------------------
 export const getStatus = handle((req) => wa.getOverviewStatus(req.masterAdmin), { tag: "status" });
-export const getSettings = handle((req) => wa.getSettingsView(req.masterAdmin), { tag: "get settings" });
+export const getSettings = handle((req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.set('X-WhatsApp-Diagnostics-Version', '2');
+  return wa.getSettingsView(req.masterAdmin);
+}, { tag: "get settings" });
 export const updateSettings = handle((req) => settings.updateSettings(req.body, editor(req)), { tag: "update settings" });
 export const testConnection = handle(() => wa.testConnection(), { tag: "test connection" });
 export const webhookEvents = handle((req) => listWebhookEvents(req.query), { tag: "webhook events" });
 export const retryEvent = handle((req) => retryWebhookEvent(req.params.id), { tag: 'retry webhook event' });
-export const runWorker = handle(() => runWorkerTick({ maxCampaignSends: 40 }), { tag: "run worker" });
+export const runWorker = handle(() => runWorkerTick({ maxCampaignSends: 40, trigger: 'admin' }), { tag: "run worker" });
 
 // Conversations -------------------------------------------------------------------
 export const listConversations = handle((req) => conversations.listConversations(req.query), { tag: "list conversations" });

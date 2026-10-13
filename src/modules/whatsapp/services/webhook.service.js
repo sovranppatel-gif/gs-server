@@ -150,15 +150,23 @@ async function processMessageEvent(event) {
 }
 
 /** Persist only. HTTP acknowledgement never waits for automation or Meta. */
-export async function ingestWebhook(body, { simulated = false } = {}) {
+export async function ingestWebhook(body, { simulated = false, signatureVerified = null } = {}) {
   const events = extractEvents(body);
   const summary = { received: events.length, duplicates: 0, queued: 0 };
   for (const event of events) {
     try {
-      await WhatsAppWebhookEvent.create({ ...event, simulated });
+      await WhatsAppWebhookEvent.create({ ...event, simulated,
+        signatureVerified: simulated ? false : signatureVerified === true ? true : null,
+        signatureVerifiedAt: !simulated && signatureVerified === true ? new Date() : null,
+      });
       summary.queued += 1;
     } catch (error) {
       if (error?.code !== 11000) throw error;
+      if (!simulated && signatureVerified === true) {
+        await WhatsAppWebhookEvent.updateOne({ eventId: event.eventId, simulated: false }, {
+          $set: { signatureVerified: true, signatureVerifiedAt: new Date() },
+        });
+      }
       summary.duplicates += 1;
     }
   }
@@ -213,7 +221,7 @@ export async function reprocessStuckEvents({ limit = 20, deadline = Date.now() +
           : doc.eventType === 'status' ? { status: await applyStatusUpdate(doc.payload?.status, { simulated: doc.simulated }) }
           : { status: 'ignored', note: doc.eventType === 'error' ? `Provider error ${doc.payload?.code || ''}` : 'unsupported event' };
         const done = await WhatsAppWebhookEvent.updateOne({ _id: doc._id, processingToken: token }, {
-          $set: { status: result.status, processedAt: new Date(), lockedUntil: null, nextAttemptAt: null, error: result.status === 'ignored' ? result.note || '' : '' },
+          $set: { status: result.status, processingOutcome: result.note || '', processedAt: new Date(), lockedUntil: null, nextAttemptAt: null, error: result.status === 'ignored' ? result.note || '' : '' },
         });
         if (!done.matchedCount) throw new Error('Event lease lost');
       });

@@ -8,7 +8,7 @@ import { WhatsAppMessage } from "./models/whatsappMessage.model.js";
 import { WhatsAppConversation } from "./models/whatsappConversation.model.js";
 import { WhatsAppWebhookEvent } from "./models/whatsappWebhookEvent.model.js";
 import { WhatsAppAutomation } from "./models/whatsappAutomation.model.js";
-import { getBotDiagnostics, getWorkerDiagnostics } from "./whatsapp.diagnostics.js";
+import { getBotDiagnostics, getWorkerDiagnostics, getConfigurationDiagnostics } from "./whatsapp.diagnostics.js";
 import { getConnectionStatus, isDryRun } from "./whatsapp.config.js";
 import { checkPhoneNumber } from "./whatsapp.client.js";
 import { findOrCreateContact } from "./services/contact.service.js";
@@ -16,7 +16,7 @@ import { getOrOpenConversation, getConversation } from "./services/conversation.
 import { createOutbound, dispatchMessage } from "./services/message.service.js";
 import { templateSendability } from "./services/template.service.js";
 import { ingestWebhook } from "./services/webhook.service.js";
-import { getSettings } from "./services/settings.service.js";
+import { getSettings, readSettings } from "./services/settings.service.js";
 import { permissionsFor } from "./whatsapp.permissions.js";
 import { assertObjectId, badRequest, HttpError, notFound } from "./whatsapp.utils.js";
 
@@ -33,15 +33,18 @@ export async function getOverviewStatus(masterAdmin) {
 }
 
 export async function getSettingsView(masterAdmin) {
-  const [settings, lastEvent, incoming, lastReply, failedReply, pending, failed, enabledAutomations] = await Promise.all([
-    getSettings(),
-    WhatsAppWebhookEvent.findOne({ simulated: false }).sort({ receivedAt: -1 }).select('receivedAt eventType status').lean(),
+  const [settings, lastEvent, incoming, lastReply, failedReply, pending, failed, enabledAutomations, signedEvent, messageEvent, realCounts] = await Promise.all([
+    readSettings(),
+    WhatsAppWebhookEvent.findOne({ simulated: false }).sort({ receivedAt: -1 }).select('receivedAt eventType status processedAt').lean(),
     WhatsAppMessage.findOne({ direction: 'inbound', simulatedInbound: { $ne: true }, providerMessageId: { $not: /^wamid\.SIM\./ } }).sort({ timestamp: -1 }).select('timestamp').lean(),
     WhatsAppMessage.findOne({ origin: 'automation', dryRun: false, acceptedAt: { $ne: null } }).sort({ acceptedAt: -1 }).select('acceptedAt').lean(),
     WhatsAppMessage.findOne({ origin: 'automation', dryRun: false, status: 'failed' }).sort({ failedAt: -1 }).select('failedAt error').lean(),
     WhatsAppWebhookEvent.countDocuments({ status: { $in: ['received', 'processing'] } }),
     WhatsAppWebhookEvent.countDocuments({ status: 'failed' }),
     WhatsAppAutomation.countDocuments({ enabled: true }),
+    WhatsAppWebhookEvent.findOne({ simulated: false, signatureVerified: true }).sort({ signatureVerifiedAt: -1 }).select('signatureVerifiedAt').lean(),
+    WhatsAppWebhookEvent.findOne({ simulated: false, eventType: 'message' }).sort({ receivedAt: -1 }).select('receivedAt status processingOutcome processedAt').lean(),
+    WhatsAppWebhookEvent.aggregate([{ $match: { simulated: false } }, { $group: { _id: '$status', count: { $sum: 1 } } }]),
   ]);
   const connection = getConnectionStatus();
   const recentTest = settings.connectionTest;
@@ -51,25 +54,48 @@ export async function getSettingsView(masterAdmin) {
   const worker = getWorkerDiagnostics(settings, getWorkerState(), {
     serverless: connection.runtime === 'serverless', cronConfigured: Boolean(env.cronSecret),
   });
+  const counts = Object.fromEntries(['received', 'processing', 'processed', 'ignored', 'failed'].map((status) => [status, realCounts.find((row) => row._id === status)?.count || 0]));
+  const revision = /^[a-f0-9]{7,40}$/i.test(process.env.VERCEL_GIT_COMMIT_SHA || '') ? process.env.VERCEL_GIT_COMMIT_SHA.slice(0, 12) : null;
+  const safeSettings = Object.fromEntries(Object.entries(settings).filter(([key]) => !['workerLeaseToken', 'workerLockedUntil'].includes(key)));
+  if (safeSettings.workerLastError) safeSettings.workerLastError = safeError(safeSettings.workerLastError);
+  if (safeSettings.connectionTest?.error) safeSettings.connectionTest = { ...safeSettings.connectionTest, error: safeError(safeSettings.connectionTest.error) };
   return {
     connection,
     webhook: {
       lastRealEventAt: lastEvent?.receivedAt || null, lastEventType: lastEvent?.eventType || '',
       verifyTokenConfigured: Boolean(env.whatsappVerifyToken), appSecretConfigured: Boolean(env.whatsappAppSecret),
       signatureRequired: true,
+      status: lastEvent ? 'observed' : 'not_observed',
+      reason: lastEvent ? 'A matching real webhook event is stored. Inspect signature evidence and processing state separately.' : 'No matching real webhook events are stored in retained history. Verify WABA/app subscription, messages field, callback delivery, signatures and account/phone identity.',
+      lastSignedEventAt: signedEvent?.signatureVerifiedAt || null,
+      signatureEvidence: signedEvent ? 'verified_event_recorded' : 'not_recorded',
+      lastEventProcessingStatus: lastEvent?.status || null,
+      lastEventProcessedAt: lastEvent?.processedAt || null,
+      lastMessageEventAt: messageEvent?.receivedAt || null,
+      lastMessageProcessingStatus: messageEvent?.status || null,
+      lastMessageOutcome: messageEvent?.processingOutcome || '',
+      realEventCounts: counts,
     },
     diagnostics: {
+      schemaVersion: 2,
+      deployment: { runtime: connection.runtime, revision, environment: ['production', 'preview', 'development'].includes(process.env.VERCEL_ENV) ? process.env.VERCEL_ENV : env.nodeEnv === 'production' ? 'production' : 'development' },
+      configuration: getConfigurationDiagnostics(env),
       lastIncomingAt: incoming?.timestamp || null,
       lastAutoReplyAcceptedAt: lastReply?.acceptedAt || null,
       lastFailedReplyAt: failedReply?.failedAt || null,
-      lastReplyError: failedReply?.error || null,
+      lastReplyError: failedReply?.error ? { ...failedReply.error, message: safeError(failedReply.error.message) } : null,
       botEnabled: bot.enabled,
       bot,
       pendingEvents: pending, failedEvents: failed,
       worker: { ...worker, lastError: worker.lastError ? safeError(worker.lastError) : '' },
-      connectionTest: recentTest || null,
+      connectionTest: safeSettings.connectionTest || null,
+      coexistence: {
+        status: 'not_verified', compatibility: 'cloud_api_messages_only',
+        cloudApiInboundSupported: true, businessAppEchoImportSupported: false, historySyncSupported: false,
+        reason: 'Credentials do not verify Business App and Cloud API Coexistence onboarding. This module handles the messages field; Business App echo/history synchronization is not implemented. App-only replies are not a substitute for Cloud API webhook delivery.',
+      },
     },
-    settings: Object.fromEntries(Object.entries(settings).filter(([key]) => !['workerLeaseToken', 'workerLockedUntil'].includes(key))), permissions: permissionsFor(masterAdmin),
+    settings: safeSettings, permissions: permissionsFor(masterAdmin),
   };
 }
 
@@ -138,7 +164,7 @@ export async function simulateInbound({ phone, text, name }) {
     ],
   };
   const summary = await ingestWebhook(body, { simulated: true });
-  await runWorkerTick({ maxCampaignSends: 0 });
+  await runWorkerTick({ maxCampaignSends: 0, trigger: 'simulation' });
   const contactConversation = await WhatsAppMessage.findOne({ providerMessageId: id }).select("conversationId").lean();
   return { summary, providerMessageId: id, conversationId: contactConversation?.conversationId || null };
 }
@@ -175,6 +201,6 @@ export async function simulateStatus({ providerMessageId, status }) {
     ],
   };
   const summary = await ingestWebhook(body, { simulated: true });
-  await runWorkerTick({ maxCampaignSends: 0 });
+  await runWorkerTick({ maxCampaignSends: 0, trigger: 'simulation' });
   return summary;
 }

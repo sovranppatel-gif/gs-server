@@ -3,6 +3,15 @@ import { cleanString } from "../whatsapp.utils.js";
 
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
+/** Settings diagnostics must not upsert or update timestamps on a GET request. */
+export async function readSettings() {
+  const saved = await WhatsAppSettings.findOne({ key: 'default' }).lean();
+  if (saved) return saved;
+  const defaults = new WhatsAppSettings().toObject();
+  delete defaults._id;
+  return { ...defaults, autoReplyEnabled: null };
+}
+
 export async function getSettings() {
   return WhatsAppSettings.findOneAndUpdate(
     { key: "default" },

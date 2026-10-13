@@ -13,6 +13,10 @@ const whatsappWebhookEventSchema = new mongoose.Schema(
     phone: { type: String, default: "" },
     payload: { type: mongoose.Schema.Types.Mixed, default: null },
     simulated: { type: Boolean, default: false },
+    // Null means legacy/internal ingestion with no stored signature evidence.
+    signatureVerified: { type: Boolean, default: null },
+    signatureVerifiedAt: { type: Date, default: null },
+    processingOutcome: { type: String, default: '' },
     status: { type: String, enum: ["received", "processing", "processed", "ignored", "failed"], default: "received" },
     error: { type: String, default: "" },
     attempts: { type: Number, default: 0 },

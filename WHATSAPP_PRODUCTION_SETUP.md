@@ -237,6 +237,106 @@ Redeploy backend and frontend code only after approval. See
 [Vercel environment variables](https://vercel.com/docs/environment-variables) and
 [Vercel cron limits](https://vercel.com/docs/cron-jobs/usage-and-pricing).
 
+## Production Settings response audit (2026-10-13)
+
+The public production Settings endpoint returned HTTP 401/JSON without an admin session,
+as required. The owner supplied the authenticated response. It has `success: true` and
+saved `autoReplyEnabled: true`, but omits the entire `data.diagnostics` object and
+`connection.autoReplyAllowed`, `connection.readiness` and `connection.webhookUrl`.
+It also returns internal worker lease fields that the current local service filters out.
+The public frontend bundle points to the correct `gs-server-woad.vercel.app` host and
+contains the newer Settings UI. These facts confirm an older backend response contract;
+they do not demonstrate that the environment bot switch is enabled or disabled.
+
+The supplied response reports no recorded real webhook event. Saved worker timestamps
+are present, but do not identify whether work came from cron or a manual tick. Neither
+configured credentials nor a successful Settings HTTP response verifies Meta delivery,
+Coexistence onboarding, a deployed Vercel plan or functioning scheduled work.
+
+The current response preserves `{ success: true, data: { connection, webhook, settings,
+permissions, diagnostics } }` and adds `diagnostics.schemaVersion: 2`, non-secret
+configuration booleans, deployment revision, real event processing/counts, signature
+evidence, cron execution evidence and Coexistence limitations. The Settings controller
+returns `Cache-Control: no-store` and `X-WhatsApp-Diagnostics-Version: 2`.
+Settings GET is read-only, including skipping default seeding in the Vercel adapter.
+Missing saved settings are reported as unknown, rather than inserted during diagnostics.
+
+The frontend validates the core payload even on HTTP 200. Missing/malformed diagnostics
+produce specific field names and a deployment warning. Missing counts remain unavailable;
+legacy worker timestamps are shown as limited evidence. Unknown environment flags cannot
+become Enabled. Contradictory bot flags cannot become a verified bot status.
+No new endpoint, public admin bypass or hardcoded replacement automation was introduced.
+
+Signature evidence is written only after successful HTTP HMAC validation; simulation
+never counts. Older event records are not backfilled with invented verification evidence.
+Processing outcomes expose static reasons such as `human_handover` or
+`auto_reply_disabled`, without customer message bodies. New cron timestamps distinguish
+an authenticated queue tick from an admin/simulation run. The hosting plan remains
+`not_verified` because the application cannot infer it from environment credentials.
+
+## Business App / Cloud API Coexistence boundary
+
+This integration accepts Cloud API `messages` events. The current parser does not import
+Business App `smb_message_echoes`, `history` or `smb_app_state_sync` events; these events
+must not trigger incoming-message automation. There is no Embedded Signup onboarding
+record in this implementation. Diagnostics therefore report `not_verified` and
+`cloud_api_messages_only`, even when send credentials are configured or API-validated.
+The Business App's outbound conversation history and human responses are not synchronized
+with CRM handover; use the CRM's existing handover controls while this limitation exists.
+
+Confirm the number's actual Coexistence onboarding, app/WABA subscription and correct
+`messages` callback in Meta Dashboard. Credentials alone do not establish onboarding.
+See [Meta Business App onboarding](https://developers.facebook.com/documentation/business-messaging/whatsapp/embedded-signup/onboarding-business-app-users)
+and [Meta echo webhook reference](https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/smb_message_echoes).
+Meta's primary documentation returned HTTP 429 during this audit, so current account
+eligibility/onboarding requirements were not verified from this workspace. Do not
+declare full Coexistence synchronization support or switch providers based on this audit.
+
+## Deployment commands (manual approval required)
+
+The backend has not been deployed by this task. First verify the Vercel plan supports
+the existing every-minute cron (Pro/Enterprise), or arrange an authorized external
+scheduler and its deployment configuration. Preserve server secrets in Vercel's
+Production environment; local `.env` is not uploaded. Then, from PowerShell:
+
+```powershell
+Set-Location D:\growskillstech\gs-server
+npm.cmd ci
+npm.cmd run test:whatsapp
+npx.cmd vercel link
+# Select the EXISTING backend project. After approval:
+npx.cmd vercel --prod
+
+Set-Location D:\growskillstech\gs-frontend
+npm.cmd ci
+node --test tests/whatsapp.diagnostics.test.js
+$env:VITE_API_BASE_URL = 'https://gs-server-woad.vercel.app'
+npm.cmd run build
+```
+
+Publish the frontend `dist` contents using the site's existing hosting process only
+after approval. No hosting account/SSH destination was supplied, so do not invent an
+upload target. Use the existing admin session to read Settings after deployment:
+verify `data.diagnostics.schemaVersion === 2`, both bot control booleans, numeric
+automation count, configuration flags and worker/cron evidence. If schema 2 is absent,
+check the linked backend project, root directory, production alias and deployed revision.
+Changes to Vercel environment values require a new deployment. Never test by clicking
+Process queue now or retrying events without approval: those actions can send messages.
+
+Files changed by this diagnostics fix:
+
+- Backend: `api/index.js`, `src/config/whatsappEnv.js`,
+  `src/modules/whatsapp/whatsapp.controller.js`, `whatsapp.service.js`,
+  `whatsapp.diagnostics.js`, `models/whatsappSettings.model.js`,
+  `models/whatsappWebhookEvent.model.js`, `services/settings.service.js`,
+  `services/webhook.service.js`, `services/worker.service.js` (module-relative paths).
+- Backend tests: `tests/whatsapp.diagnostics.test.js`, `tests/whatsapp.production.test.js`.
+- Frontend: `src/services/whatsappService.js`,
+  `src/components/master-admin/whatsapp/whatsappDiagnostics.js`,
+  `src/components/master-admin/whatsapp/WhatsAppSettingsPage.jsx`,
+  `tests/whatsapp.diagnostics.test.js`.
+- Documentation: `WHATSAPP_PRODUCTION_SETUP.md`.
+
 ## Tests and live acceptance
 
 ```sh
@@ -305,9 +405,9 @@ timeouts. Reverting to unsafe sending code is not a safe way to recover unknown 
 
 ## Current validation boundaries
 
-Local validation on 2026-10-13: 92/92 backend tests (production flow, verification and
+Local validation on 2026-10-13: 101/101 backend tests (production flow, verification and
 diagnostics) passed against an isolated MongoDB 8.0 replica set with mocked Meta requests;
-6/6 frontend bot-status tests passed; the frontend production build passed with its
+13/13 frontend bot-status/response-contract tests passed; the frontend production build passed with its
 existing large-bundle warning. Campaign controls, signature rejection, both bot
 switches, legacy missing settings, queued-reply pause, serverless heartbeat and Workshop
 delivery-status forwarding are covered. No customer database was used for tests and no
@@ -316,7 +416,10 @@ real email/WhatsApp message was sent.
 Local configuration permits live auto replies and essential credential keys are set,
 but presence does not validate their values. Read-only access to the configured database
 was unavailable from this workspace (connection timeout/refusal); it did not establish
-an authentication problem. The deployed saved bot flag, Vercel environment and actual
-Meta delivery remain unverified. No live Meta requests, inbound acceptance test,
-deployment or production data changes were performed. Complete the live checklist only
+an authentication problem. The owner's authenticated production response confirms saved
+auto replies are enabled and the deployed diagnostic contract is older. Its environment
+switch, actual Vercel plan, Meta delivery and Coexistence onboarding remain unverified.
+Public read-only HTTPS probes and the owner-supplied response were used for this audit;
+no live Meta requests, message sends, deployment or production write operations were
+performed. Complete the live checklist only
 with explicit approval before treating this as a verified production integration.

@@ -25,7 +25,9 @@ export default async function handler(req, res) {
     // Meta's verification handshake must work even while the DB is unavailable.
     if (isWhatsappWebhookVerificationRequest(req)) return app(req, res);
     await ensureMongoConnection();
-    if (req.url?.startsWith('/api/whatsapp')) await initializeWhatsapp();
+    // A diagnostic read must not seed settings/flows on a serverless cold start.
+    const settingsRead = req.method === 'GET' && /^\/api\/whatsapp\/settings\/?$/.test(String(req.url || '').split('?')[0]);
+    if (req.url?.startsWith('/api/whatsapp') && !settingsRead) await initializeWhatsapp();
     return app(req, res);
   } catch (error) {
     console.error("Vercel MongoDB connection failed:", safeError(error));

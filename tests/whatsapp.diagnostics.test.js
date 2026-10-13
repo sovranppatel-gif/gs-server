@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { getBotDiagnostics, getWorkerDiagnostics } from '../src/modules/whatsapp/whatsapp.diagnostics.js';
+import { getBotDiagnostics, getWorkerDiagnostics, getConfigurationDiagnostics } from '../src/modules/whatsapp/whatsapp.diagnostics.js';
 import { resolveWhatsappEnv } from '../src/config/whatsappEnv.js';
 
 test('bot diagnostic explains both independent switches without leaking config', () => {
@@ -46,4 +46,23 @@ test('worker diagnoses stale heartbeat, last failure and stopped persistent work
 
 test('cleared durable error overrides an older process-local error', () => {
   assert.equal(getWorkerDiagnostics({ workerLastTickAt: new Date(now), workerLastError: '' }, { ...state, lastError: 'Old error' }, runtime).status, 'recent_tick');
+});
+
+test('invalid environment boolean fails closed without returning the invalid value or credentials', () => {
+  const config = resolveWhatsappEnv({ WHATSAPP_AUTO_REPLY_ENABLED: 'INVALID_VALUE', WHATSAPP_MODE: 'live', WHATSAPP_DRY_RUN: 'false', WHATSAPP_ACCESS_TOKEN: 'DO_NOT_RETURN' });
+  assert.equal(config.whatsappAutoReplyEnabled, false); assert.equal(config.whatsappMode, 'not_ready');
+  const view = getConfigurationDiagnostics(config);
+  assert.equal(view.autoReplyValid, false); assert.equal(view.modeConfigured, true); assert.equal(view.dryRun, false);
+  assert.ok(!JSON.stringify(view).includes('DO_NOT_RETURN')); assert.ok(!JSON.stringify(view).includes('INVALID_VALUE'));
+  assert.match(getBotDiagnostics({ autoReplyEnabled: true }, config, 7).reasons.join(' '), /invalid configuration/);
+});
+
+test('a manual tick does not prove scheduled work; authenticated cron evidence is tracked separately', () => {
+  const settings = { workerLastTickAt: new Date(now), workerLastTrigger: 'admin' };
+  const manual = getWorkerDiagnostics(settings, state, runtime);
+  assert.equal(manual.status, 'recent_tick'); assert.equal(manual.scheduleStatus, 'not_observed');
+  assert.equal(manual.planStatus, 'not_verified');
+  const cron = getWorkerDiagnostics({ ...settings, workerLastCronTickAt: new Date(now - 60000) }, state, runtime);
+  assert.equal(cron.scheduleStatus, 'recent_tick');
+  assert.equal(getWorkerDiagnostics({ ...settings, workerLastCronTickAt: new Date(now - 360000) }, state, runtime).scheduleStatus, 'stale');
 });

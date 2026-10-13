@@ -3,9 +3,11 @@ export function resolveWhatsappEnv(source = process.env) {
   const value = (...keys) => keys.map((key) => String(source[key] || '').trim()).find(Boolean) || '';
   const mode = value('WHATSAPP_MODE').toLowerCase();
   const dry = value('WHATSAPP_DRY_RUN').toLowerCase();
+  const autoReply = value('WHATSAPP_AUTO_REPLY_ENABLED').toLowerCase();
   const errors = [];
   if (mode && !['live', 'dry_run'].includes(mode)) errors.push('WHATSAPP_MODE must be live or dry_run');
   if (dry && !['true', 'false'].includes(dry)) errors.push('WHATSAPP_DRY_RUN must be true or false');
+  if (autoReply && !['true', 'false'].includes(autoReply)) errors.push('WHATSAPP_AUTO_REPLY_ENABLED must be true or false');
   if (mode && dry && (mode === 'dry_run') !== (dry === 'true')) errors.push('WHATSAPP_MODE conflicts with WHATSAPP_DRY_RUN');
   const dryRun = mode ? mode === 'dry_run' : dry ? dry === 'true' : source.NODE_ENV !== 'production';
   const version = value('META_GRAPH_API_VERSION', 'WHATSAPP_API_VERSION') || 'v26.0';
@@ -27,8 +29,11 @@ export function resolveWhatsappEnv(source = process.env) {
     whatsappMode: errors.length ? 'not_ready' : dryRun ? 'dry_run' : 'live',
     whatsappConfigErrors: errors,
     whatsappWebhookUrl: value('WHATSAPP_WEBHOOK_URL'),
-    whatsappAutoReplyEnabled: value('WHATSAPP_AUTO_REPLY_ENABLED').toLowerCase() !== 'false',
-    whatsappAutoReplyConfigured: Boolean(value('WHATSAPP_AUTO_REPLY_ENABLED')),
+    whatsappAutoReplyEnabled: !autoReply || autoReply === 'true',
+    whatsappAutoReplyConfigured: Boolean(autoReply),
+    whatsappAutoReplyValid: !autoReply || ['true', 'false'].includes(autoReply),
+    whatsappModeConfigured: Boolean(mode),
+    whatsappDryRunConfigured: Boolean(dry),
     whatsappBusinessTimezone: value('WHATSAPP_BUSINESS_TIMEZONE') || 'Asia/Kolkata',
     whatsappSendTimeoutMs: Math.max(1000, number('WHATSAPP_SEND_TIMEOUT_MS', 15000, 30000)),
     whatsappMaxRetries: Math.floor(number('WHATSAPP_MAX_RETRIES', 3, 5)),

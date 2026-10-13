@@ -132,13 +132,18 @@ export async function runWorkerTick(options = {}) {
   if (mongoose.connection.readyState !== 1) return { skipped: 'db_not_ready' };
   await getSettings();
   const leaseToken = new mongoose.Types.ObjectId().toString();
+  const trigger = ['cron', 'admin', 'interval', 'simulation'].includes(options.trigger) ? options.trigger : 'unknown';
   const claim = await WhatsAppSettings.findOneAndUpdate({ key: 'default', $or: [{ workerLockedUntil: null }, { workerLockedUntil: { $lt: new Date() } }] }, {
-    $set: { workerLeaseToken: leaseToken, workerLockedUntil: new Date(Date.now() + 120000), workerLastTickAt: new Date() },
+    $set: { workerLeaseToken: leaseToken, workerLockedUntil: new Date(Date.now() + 120000), workerLastTickAt: new Date(), workerLastTrigger: trigger,
+      ...(trigger === 'cron' ? { workerLastCronTickAt: new Date() } : {}),
+    },
   }, { returnDocument: 'after' });
   if (!claim) return { skipped: 'worker_busy' };
   try {
     const result = await tick(options);
-    await WhatsAppSettings.updateOne({ key: 'default' }, { $set: { workerLastCompletedAt: new Date(), workerLastError: '' } });
+    await WhatsAppSettings.updateOne({ key: 'default' }, { $set: { workerLastCompletedAt: new Date(), workerLastError: '',
+      ...(trigger === 'cron' ? { workerLastCronCompletedAt: new Date() } : {}),
+    } });
     return result;
   } catch (error) {
     await WhatsAppSettings.updateOne({ key: 'default' }, { $set: { workerLastError: safeError(error) } }).catch(() => {});
@@ -160,7 +165,7 @@ export function startWhatsappWorker() {
     if (busy) return;
     busy = true;
     try {
-      await runWorkerTick();
+      await runWorkerTick({ trigger: 'interval' });
     } catch (err) {
       workerState.lastError = safeError(err);
       console.error("[whatsapp] worker tick failed:", workerState.lastError);
