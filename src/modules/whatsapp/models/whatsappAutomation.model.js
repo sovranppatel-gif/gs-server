@@ -52,6 +52,7 @@ const stepSchema = new mongoose.Schema(
     id: { type: String, required: true, trim: true },
     type: { type: String, enum: WA_STEP_TYPES, required: true },
     text: { type: String, default: "" },
+    footerText: { type: String, default: "" },
     field: { type: String, default: "", trim: true }, // flowData key for the answer
     optional: { type: Boolean, default: false }, // question can be skipped with "skip"
     options: { type: [optionSchema], default: [] },

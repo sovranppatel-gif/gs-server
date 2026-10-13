@@ -49,7 +49,7 @@ export async function touchConversation(conversationId, { preview, at = new Date
   const $set = { lastMessage: cleanString(preview, 200), lastMessageAt: at, lastMessageDirection: direction };
   const update = { $set };
   if (inbound) {
-    $set.lastInboundAt = at;
+    update.$max = { lastInboundAt: at };
     update.$inc = { unreadCount: 1 };
   }
   await WhatsAppConversation.updateOne({ _id: conversationId }, update);
@@ -57,7 +57,7 @@ export async function touchConversation(conversationId, { preview, at = new Date
 
 export function isWithinServiceWindow(conversation, now = Date.now()) {
   const last = conversation?.lastInboundAt ? new Date(conversation.lastInboundAt).getTime() : 0;
-  return Boolean(last) && now - last < WA_CONFIG.customerServiceWindowMs;
+  return Boolean(last) && last <= now && now - last < WA_CONFIG.customerServiceWindowMs;
 }
 
 async function decorate(rows) {

@@ -1,6 +1,7 @@
 import crypto from "crypto";
+import { safeError } from "./whatsapp.security.js";
 import { env } from "../../config/env.js";
-import { WA_CONFIG, hasSendCredentials, isDryRun } from "./whatsapp.config.js";
+import { WA_CONFIG, hasSendCredentials, isDryRun, configurationProblems } from "./whatsapp.config.js";
 
 /**
  * Low-level Meta WhatsApp Cloud API client for the General WhatsApp module.
@@ -18,7 +19,7 @@ import { WA_CONFIG, hasSendCredentials, isDryRun } from "./whatsapp.config.js";
 // Meta error codes worth retrying (rate limits, temporary service errors).
 const RETRYABLE_META_CODES = new Set([1, 2, 4, 17, 341, 613, 80007, 130429, 131000, 131016, 131048, 131056, 133004]);
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 
 function messagesUrl() {
   return `${WA_CONFIG.graphBaseUrl}/${env.whatsappApiVersion}/${env.whatsappPhoneNumberId}/messages`;
@@ -29,11 +30,12 @@ function classifyHttpError(status, body) {
   const code = Number(err.code) || status;
   const details = err.error_data?.details || err.message || `HTTP ${status}`;
   const retryable = status >= 500 || status === 429 || RETRYABLE_META_CODES.has(Number(err.code));
-  return { code: String(code), message: String(details).slice(0, 500), retryable };
+  return { code: String(code), message: safeError(details), retryable };
 }
 
 async function graphRequest(method, path, payload) {
   const url = path.startsWith("http") ? path : `${WA_CONFIG.graphBaseUrl}/${env.whatsappApiVersion}/${path}`;
+  if (new URL(url).origin !== WA_CONFIG.graphBaseUrl) return { ok: false, error: { code: "INVALID_HOST", message: "Invalid Meta API host", retryable: false } };
   try {
     const response = await fetch(url, {
       method,
@@ -51,27 +53,14 @@ async function graphRequest(method, path, payload) {
     const timeout = e?.name === "TimeoutError" || e?.name === "AbortError";
     return {
       ok: false,
-      error: { code: timeout ? "TIMEOUT" : "NETWORK", message: timeout ? "Request timed out" : e?.message || "Network error", retryable: true },
+      error: { code: timeout ? "AMBIGUOUS_TIMEOUT" : "AMBIGUOUS_NETWORK", message: "Meta request outcome unknown; inspect provider status before any manual resend", retryable: method === "GET", ambiguous: method !== "GET" },
     };
   }
 }
 
-/** POST with short in-request retries for transient failures only. */
-async function postWithRetry(url, payload) {
-  let last = null;
-  for (let attempt = 0; attempt <= WA_CONFIG.inlineRetryDelaysMs.length; attempt += 1) {
-    last = await graphRequest("POST", url, payload);
-    if (last.ok || !last.error.retryable) return last;
-    // Rate-limit codes need real backoff — leave that to the worker.
-    if (["130429", "131056", "80007", "4", "613"].includes(last.error.code)) return last;
-    const delay = WA_CONFIG.inlineRetryDelaysMs[attempt];
-    if (delay === undefined) break;
-    await sleep(delay);
-  }
-  return last;
-}
-
 async function send(payload) {
+  const problems = configurationProblems();
+  if (problems.length) return { ok: false, dryRun: false, error: { code: "NOT_READY", message: problems.join("; "), retryable: false } };
   if (isDryRun()) {
     // Never contacts Meta. The id is recognisable so webhook simulation can target it.
     return { ok: true, dryRun: true, id: `wamid.DRYRUN.${crypto.randomUUID()}` };
@@ -84,9 +73,11 @@ async function send(payload) {
     };
   }
   const body = { messaging_product: "whatsapp", recipient_type: "individual", ...payload };
-  const result = await postWithRetry(messagesUrl(), body);
+  const result = await graphRequest("POST", messagesUrl(), body);
   if (!result.ok) return { ok: false, dryRun: false, error: result.error };
-  return { ok: true, dryRun: false, id: result.data?.messages?.[0]?.id || "" };
+  const id = result.data?.messages?.[0]?.id;
+  if (typeof id !== "string" || !id) return { ok: false, dryRun: false, error: { code: "AMBIGUOUS_RESPONSE", message: "Meta accepted HTTP request without a valid message ID; do not automatically resend", retryable: false, ambiguous: true } };
+  return { ok: true, dryRun: false, id };
 }
 
 /** Template params may not contain newlines, tabs or 4+ consecutive spaces. */
@@ -151,22 +142,23 @@ export async function submitTemplate({ name, language, category, components }) {
 
 /** Lightweight credential check against the phone number object (no message sent). */
 export async function checkPhoneNumber() {
-  if (!hasSendCredentials()) return { ok: false, error: { code: "NOT_CONFIGURED", message: "Not configured", retryable: false } };
+  if (isDryRun()) return { ok: false, error: { code: "DRY_RUN", message: "Dry run is enabled; no Meta connection test was made", retryable: false } };
+  if (!hasSendCredentials()) return { ok: false, error: { code: "NOT_READY", message: "Live send credentials are missing or conflicting", retryable: false } };
   const result = await graphRequest("GET", `${env.whatsappPhoneNumberId}?fields=display_phone_number,verified_name,quality_rating`);
   if (!result.ok) return result;
   const d = result.data || {};
+  if (String(d.id || "") !== env.whatsappPhoneNumberId) return { ok: false, error: { code: "INVALID_RESPONSE", message: "Phone identity validation failed", retryable: false } };
   return { ok: true, data: { displayPhoneNumber: d.display_phone_number || "", verifiedName: d.verified_name || "", qualityRating: d.quality_rating || "" } };
 }
 
 /**
  * Verifies Meta's X-Hub-Signature-256 against the raw body. Returns
- * { valid, reason }. Without an app secret, verification is only skipped
- * outside production — production rejects instead of silently trusting.
+ * { valid, reason }. The public endpoint requires a secret in every environment;
+ * authenticated simulation bypasses HTTP and is available only in dry run.
  */
 export function verifySignature(rawBody, signatureHeader) {
   if (!env.whatsappAppSecret) {
-    if (env.nodeEnv === "production") return { valid: false, reason: "app_secret_missing" };
-    return { valid: true, reason: "skipped_no_secret_dev" };
+    return { valid: false, reason: "app_secret_missing" };
   }
   if (!rawBody || !String(signatureHeader || "").startsWith("sha256=")) return { valid: false, reason: "missing_signature" };
   const expected = crypto.createHmac("sha256", env.whatsappAppSecret).update(rawBody).digest("hex");

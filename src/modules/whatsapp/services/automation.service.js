@@ -1,3 +1,6 @@
+import { env } from "../../../config/env.js";
+import { currentExecution } from "./execution.service.js";
+import { templateSendability } from "./template.service.js";
 import { Course } from "../../courses/courses.model.js";
 import { Staff } from "../../staff/staff.model.js";
 import {
@@ -12,12 +15,12 @@ import { WhatsAppSettings } from "../models/whatsappSettings.model.js";
 import { getSettings, isWithinBusinessHours } from "./settings.service.js";
 import { addContactTag, setOptOut } from "./contact.service.js";
 import { findLeadForPhone, upsertLeadFromWhatsapp } from "./lead.service.js";
-import { createOutbound, dispatchMessage } from "./message.service.js";
+import { createOutbound } from "./message.service.js";
 import { FLOW_RESET } from "./conversation.service.js";
 import { DEFAULT_AUTOMATIONS } from "./automation.defaults.js";
 import { assertObjectId, badRequest, cleanString, notFound, notifyAdmin } from "../whatsapp.utils.js";
 
-const MENU_WORDS = new Set(["menu", "main menu", "start over", "home"]);
+const MENU_WORDS = new Set(["start", "menu", "main menu", "start over", "home"]);
 const HANDOVER_WORDS = new Set(["agent", "human", "talk to team", "talk to our team", "call me", "representative"]);
 const SKIP_WORDS = new Set(["skip", "-", "no", "na", "n/a", "nahi"]);
 const KEY_EMOJI = { 1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣", 6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟" };
@@ -101,10 +104,11 @@ async function reply(ctx, { text = "", template = null, automationId = null, ori
     template,
     origin,
     automationId,
+    idempotencyKey: currentExecution() ? `${currentExecution().eventId}:reply:${currentExecution().outbound++}` : '',
   });
   ctx.replies.push(String(message._id));
-  // Immediate attempt; transient failures stay queued for the worker.
-  return dispatchMessage(message._id);
+  // Durable outbox only: the worker sends after the event transaction commits.
+  return message;
 }
 
 async function saveConversation(ctx, $set) {
@@ -126,7 +130,7 @@ async function runAction(ctx, action, automation) {
       break;
     case "send_template": {
       const t = action.templateId ? await WhatsAppTemplate.findById(action.templateId).lean() : null;
-      if (t) await reply(ctx, { template: { name: t.name, language: t.language, params: [], bodyText: t.bodyText }, automationId: automation._id });
+      if (t && templateSendability(t).allowed) await reply(ctx, { template: { name: t.name, language: t.language, params: [], bodyText: t.bodyText }, automationId: automation._id });
       break;
     }
     case "add_tag":
@@ -218,7 +222,7 @@ async function enterStep(ctx, automation, stepId, depth = 0) {
     // Snapshot so the reply maps to exactly the list the customer saw
     patch.flowData = { ...(ctx.conversation.flowData || {}), __options: options };
     await saveConversation(ctx, patch);
-    await reply(ctx, { text: menuText(renderText(step.text, ctx), options), automationId: automation._id });
+    await reply(ctx, { text: `${menuText(renderText(step.text, ctx), options)}${step.footerText ? `\n\n${renderText(step.footerText, ctx)}` : ""}`, automationId: automation._id });
   } else {
     await saveConversation(ctx, patch);
     await reply(ctx, { text: step.text, automationId: automation._id });
@@ -306,7 +310,7 @@ async function continueFlow(ctx, text, message) {
       return false;
     }
     await saveConversation(ctx, { flowRetries: retries });
-    await reply(ctx, { text: `Please reply with a number from the list 🙏\n\n${menuText(renderText(step.text, ctx), options)}`, automationId: automation._id });
+    await reply(ctx, { text: `Please reply with a number from the list 🙏\n\n${`${menuText(renderText(step.text, ctx), options)}${step.footerText ? `\n\n${renderText(step.footerText, ctx)}` : ""}`}`, automationId: automation._id });
     return true;
   }
 
@@ -357,13 +361,14 @@ export async function handleInbound({ conversation, contact, message, isNew }) {
   if (text && keywordHit(text, settings.optOutKeywords)) {
     await setOptOut(contact._id, true);
     await saveConversation(ctx, { ...FLOW_RESET, flowData: {} });
-    await reply(ctx, { text: settings.optOutConfirmation, origin: "system" });
+    if (!conv.humanHandover) await reply(ctx, { text: settings.optOutConfirmation, origin: "system" });
     return { action: "opted_out", replies: ctx.replies };
   }
   if (text && keywordHit(text, settings.optInKeywords)) {
     await setOptOut(contact._id, false);
-    await reply(ctx, { text: settings.optInConfirmation, origin: "system" });
-    return { action: "opted_in", replies: ctx.replies };
+    ctx.contact.optOut = false;
+    if (!conv.humanHandover && !['start'].includes(stripPunct(text))) await reply(ctx, { text: settings.optInConfirmation, origin: "system" });
+    if (stripPunct(text) !== 'start') return { action: "opted_in", replies: ctx.replies };
   }
   if (ctx.contact.optOut) return { skipped: "opted_out" };
 
@@ -372,7 +377,7 @@ export async function handleInbound({ conversation, contact, message, isNew }) {
     notifyAdmin("handover_message", { conversationId: String(conv._id) });
     return { skipped: "human_handover" };
   }
-  if (!settings.autoReplyEnabled) return { skipped: "auto_reply_disabled" };
+  if (!env.whatsappAutoReplyEnabled || !settings.autoReplyEnabled) return { skipped: "auto_reply_disabled" };
 
   // 3. Global escape words
   if (text && HANDOVER_WORDS.has(stripPunct(text))) {
@@ -479,6 +484,7 @@ function normalizeSteps(steps = []) {
       text: cleanString(s.text, 4096),
       field: cleanString(s.field, 40).replace(/[^\w]/g, ""),
       optional: Boolean(s.optional),
+      footerText: cleanString(s.footerText, 1000),
       options,
       dynamicOptions: s.dynamicOptions === "courses" ? "courses" : "",
       nextStep: cleanString(s.nextStep, 40),

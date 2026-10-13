@@ -230,11 +230,22 @@ export async function retryFailed(id, by) {
   const c = await WhatsAppCampaign.findById(campaignId).lean();
   if (!c) throw notFound("Campaign not found");
   if (!["Completed", "Failed", "Paused", "Running"].includes(c.status)) throw badRequest("Retry is available once the campaign has run");
-  const failed = await WhatsAppCampaignRecipient.find({ campaignId, status: "Failed" }).select("_id messageId").lean();
-  if (!failed.length) throw badRequest("No failed recipients to retry");
+  const candidates = await WhatsAppCampaignRecipient.find({ campaignId, status: "Failed" }).select("_id messageId").lean();
+  const failed = [];
+  for (const row of candidates) {
+    const message = row.messageId ? await WhatsAppMessage.findById(row.messageId) : null;
+    if (message?.error?.ambiguous || String(message?.error?.code || '').startsWith('AMBIGUOUS_')) continue;
+    if (message) {
+      Object.assign(message, { status: 'queued', error: null, failedAt: null, nextAttemptAt: new Date(), attempts: 0, lockedUntil: null });
+      if (!message.queuedMode) { message.queuedMode = c.dryRun ? 'dry_run' : 'live'; message.dryRun = c.dryRun; }
+      await message.save();
+    }
+    failed.push(row);
+  }
+  if (!failed.length) throw badRequest("No safe failed recipients to retry. Unknown send outcomes require provider verification.");
   await WhatsAppCampaignRecipient.updateMany(
-    { _id: { $in: failed.map((f) => f._id) } },
-    { $set: { status: "Pending", error: "", failedAt: null, messageId: null, providerMessageId: "", lockedUntil: null } }
+    { _id: { $in: failed.map((row) => row._id) } },
+    { $set: { status: "Pending", error: "", failedAt: null, lockedUntil: null } }
   );
   if (c.status !== "Running" && c.status !== "Paused") {
     await WhatsAppCampaign.updateOne({ _id: campaignId }, { $set: { status: "Queued", completedAt: null, updatedBy: by } });

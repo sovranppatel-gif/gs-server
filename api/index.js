@@ -1,3 +1,5 @@
+import { initializeWhatsapp } from "../src/modules/whatsapp/services/initialize.service.js";
+import { safeError } from '../src/modules/whatsapp/whatsapp.security.js';
 import mongoose from "mongoose";
 import { app } from "../src/index.js";
 import { connectMongo } from "../src/db/connectMongo.js";
@@ -19,10 +21,13 @@ async function ensureMongoConnection() {
 
 export default async function handler(req, res) {
   try {
+    // Meta's verification handshake must work even while the DB is unavailable.
+    if (req.method === 'GET' && req.url?.split('?')[0] === '/api/whatsapp/webhook') return app(req, res);
     await ensureMongoConnection();
+    if (req.url?.startsWith('/api/whatsapp')) await initializeWhatsapp();
     return app(req, res);
   } catch (error) {
-    console.error("Vercel MongoDB connection failed:", error?.message || error);
+    console.error("Vercel MongoDB connection failed:", safeError(error));
     res.setHeader("Retry-After", "5");
     if (req.url === "/api/health" || req.url?.startsWith("/api/health?")) {
       return res.status(503).json({

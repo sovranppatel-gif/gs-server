@@ -1,11 +1,13 @@
 import mongoose from "mongoose";
+import { safeError } from "../whatsapp.security.js";
 import { WhatsAppCampaign } from "../models/whatsappCampaign.model.js";
 import { WhatsAppCampaignRecipient } from "../models/whatsappCampaignRecipient.model.js";
 import { WhatsAppContact } from "../models/whatsappContact.model.js";
 import { WhatsAppMessage } from "../models/whatsappMessage.model.js";
 import { WA_CONFIG } from "../whatsapp.config.js";
+import { WhatsAppSettings } from "../models/whatsappSettings.model.js";
 import { getSettings } from "./settings.service.js";
-import { createOutbound, dispatchDueMessages } from "./message.service.js";
+import { createOutbound, dispatchDueMessages, syncRecipient } from "./message.service.js";
 import { reprocessStuckEvents } from "./webhook.service.js";
 import { notifyAdmin } from "../whatsapp.utils.js";
 
@@ -29,7 +31,7 @@ async function promoteCampaigns(now) {
 /** Turns pending recipients of running campaigns into outbox messages, within the rate budget. */
 async function enqueueRecipients(budget, now) {
   if (budget <= 0) return 0;
-  const running = await WhatsAppCampaign.find({ status: "Running" }).sort({ startedAt: 1 }).select("_id template").lean();
+  const running = await WhatsAppCampaign.find({ status: "Running" }).sort({ startedAt: 1 }).select("_id template dryRun").lean();
   let enqueued = 0;
   for (const campaign of running) {
     while (enqueued < budget) {
@@ -45,7 +47,8 @@ async function enqueueRecipients(budget, now) {
         await WhatsAppCampaignRecipient.updateOne({ _id: recipient._id }, { $set: { status: "Skipped", skipReason: "Opted out", lockedUntil: null } });
         continue;
       }
-      const message = await createOutbound({
+      const existingMessage = await WhatsAppMessage.findOne({ idempotencyKey: `campaign:${recipient._id}` });
+      const message = existingMessage || await createOutbound({
         contactId: contact?._id || null,
         phone: recipient.phone,
         template: { name: campaign.template.name, language: campaign.template.language, params: recipient.params, bodyText: campaign.template.bodyText },
@@ -53,8 +56,11 @@ async function enqueueRecipients(budget, now) {
         campaignId: campaign._id,
         campaignRecipientId: recipient._id,
         touch: false,
+        dryRun: campaign.dryRun,
+        idempotencyKey: `campaign:${recipient._id}`,
       });
       await WhatsAppCampaignRecipient.updateOne({ _id: recipient._id }, { $set: { messageId: message._id, lockedUntil: null } });
+      if (existingMessage) await syncRecipient(existingMessage);
       enqueued += 1;
     }
     if (enqueued >= budget) break;
@@ -63,6 +69,12 @@ async function enqueueRecipients(budget, now) {
 }
 
 async function finalizeCampaigns() {
+  // Recovery if the process stopped between acceptance and recipient bookkeeping.
+  const unfinished = await WhatsAppCampaignRecipient.find({ status: 'Pending', messageId: { $ne: null } }).limit(100).lean();
+  for (const recipient of unfinished) {
+    const message = await WhatsAppMessage.findById(recipient.messageId);
+    if (message) await syncRecipient(message);
+  }
   const running = await WhatsAppCampaign.find({ status: "Running" }).select("_id").lean();
   for (const c of running) {
     const pending = await WhatsAppCampaignRecipient.countDocuments({ campaignId: c._id, status: "Pending" });
@@ -84,17 +96,18 @@ async function finalizeCampaigns() {
  * One pass over all queued work. `maxCampaignSends` caps campaign messages
  * for this tick (the per-minute rate is enforced against Mongo either way).
  */
-export async function runWorkerTick({ maxCampaignSends = null } = {}) {
+async function tick({ maxCampaignSends = null, deadline = Date.now() + 20000 } = {}) {
+  workerState.lastTickAt = new Date();
   if (mongoose.connection.readyState !== 1) return { skipped: "db_not_ready" };
   const now = new Date();
   const settings = await getSettings();
   const rate = settings.campaignRatePerMinute || 60;
 
-  const reprocessed = await reprocessStuckEvents();
+  const reprocessed = await reprocessStuckEvents({ deadline });
   await promoteCampaigns(now);
 
   // Conversational messages (agent / automation retries) are never rate-held behind campaigns
-  const conversational = await dispatchDueMessages({ limit: 50, origins: ["agent", "automation", "system"] });
+  const conversational = await dispatchDueMessages({ limit: 50, origins: ["agent", "automation", "system"], deadline });
 
   const sentLastMinute = await WhatsAppMessage.countDocuments({ origin: "campaign", acceptedAt: { $gte: new Date(now.getTime() - 60_000) } });
   const perTick = maxCampaignSends ?? Math.max(1, Math.ceil((rate * WA_CONFIG.workerPollMs) / 60_000));
@@ -106,13 +119,37 @@ export async function runWorkerTick({ maxCampaignSends = null } = {}) {
     : 0;
   const enqueued = await enqueueRecipients(Math.max(0, budget - queuedCampaign), now);
   const campaignSent = runningIds.length
-    ? await dispatchDueMessages({ limit: budget, origins: ["campaign"], extraFilter: { campaignId: { $in: runningIds } } })
+    ? await dispatchDueMessages({ limit: budget, origins: ["campaign"], deadline, extraFilter: { campaignId: { $in: runningIds } } })
     : 0;
 
   await finalizeCampaigns();
+  workerState.lastCompletedAt = new Date();
+  workerState.lastError = '';
   return { reprocessed, conversational, enqueued, campaignSent, budget };
 }
 
+export async function runWorkerTick(options = {}) {
+  if (mongoose.connection.readyState !== 1) return { skipped: 'db_not_ready' };
+  await getSettings();
+  const leaseToken = new mongoose.Types.ObjectId().toString();
+  const claim = await WhatsAppSettings.findOneAndUpdate({ key: 'default', $or: [{ workerLockedUntil: null }, { workerLockedUntil: { $lt: new Date() } }] }, {
+    $set: { workerLeaseToken: leaseToken, workerLockedUntil: new Date(Date.now() + 120000), workerLastTickAt: new Date() },
+  }, { returnDocument: 'after' });
+  if (!claim) return { skipped: 'worker_busy' };
+  try {
+    const result = await tick(options);
+    await WhatsAppSettings.updateOne({ key: 'default' }, { $set: { workerLastCompletedAt: new Date(), workerLastError: '' } });
+    return result;
+  } catch (error) {
+    await WhatsAppSettings.updateOne({ key: 'default' }, { $set: { workerLastError: safeError(error) } }).catch(() => {});
+    throw error;
+  } finally {
+    await WhatsAppSettings.updateOne({ key: 'default', workerLeaseToken: leaseToken }, { $set: { workerLockedUntil: null, workerLeaseToken: '' } }).catch(() => {});
+  }
+}
+
+const workerState = { lastTickAt: null, lastCompletedAt: null, lastError: '' };
+export const getWorkerState = () => ({ ...workerState, running: Boolean(timer), busy });
 let timer = null;
 let busy = false;
 
@@ -125,7 +162,8 @@ export function startWhatsappWorker() {
     try {
       await runWorkerTick();
     } catch (err) {
-      console.error("[whatsapp] worker tick failed:", err?.message || err);
+      workerState.lastError = safeError(err);
+      console.error("[whatsapp] worker tick failed:", workerState.lastError);
     } finally {
       busy = false;
     }
@@ -134,7 +172,9 @@ export function startWhatsappWorker() {
   console.log("[whatsapp] queue worker started");
 }
 
-export function stopWhatsappWorker() {
+export async function stopWhatsappWorker() {
   if (timer) clearInterval(timer);
   timer = null;
+  const deadline = Date.now() + 25000;
+  while (busy && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
 }

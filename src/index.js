@@ -1,3 +1,6 @@
+import { webhookVerify } from "./modules/whatsapp/whatsapp.controller.js";
+import { safeError } from './modules/whatsapp/whatsapp.security.js';
+import { initializeWhatsapp } from "./modules/whatsapp/services/initialize.service.js";
 import http from "http";
 import express from "express";
 import cors from "cors";
@@ -41,7 +44,7 @@ import {
   reportsRouter as workshopReportsRoutes,
 } from "./modules/workshopManagement/workshopManagement.routes.js";
 import whatsappRoutes from "./modules/whatsapp/whatsapp.routes.js";
-import { startWhatsappWorker } from "./modules/whatsapp/services/worker.service.js";
+import { startWhatsappWorker, stopWhatsappWorker } from "./modules/whatsapp/services/worker.service.js";
 import { activityLogger } from "./middleware/activityLogger.js";
 import { requireDbReady } from "./middleware/requireDbReady.js";
 import { initSocket } from "./lib/socket.js";
@@ -122,6 +125,9 @@ app.get("/api/index.js", (_req, res) => {
     health: "/api/health",
   });
 });
+
+// Verification is public and does not need MongoDB.
+app.get("/api/whatsapp/webhook", webhookVerify);
 
 // Fail fast on API while Mongo is reconnecting (avoids long hung logins)
 app.use("/api", requireDbReady);
@@ -220,6 +226,7 @@ function listen() {
 async function shutdown(signal) {
   console.log(`Shutting down (${signal})...`);
   try {
+    await stopWhatsappWorker();
     await new Promise((resolve) => {
       server.close(() => resolve());
       setTimeout(resolve, 800);
@@ -244,7 +251,7 @@ export async function connectMongoWithRetry() {
     } catch (err) {
       console.error(
         "MongoDB connect failed, retrying in 3s:",
-        err?.message || err
+        safeError(err)
       );
       await new Promise((resolve) => setTimeout(resolve, 3000));
     }
@@ -257,6 +264,7 @@ async function start() {
   // Keep HTTP up even if Atlas DNS flaps — login should not get "connection refused"
   await listen();
   await connectMongoWithRetry();
+  await initializeWhatsapp();
   startWhatsappWorker();
 
   // Heavy demo seeds already live in Atlas — skip on every watch restart.
@@ -281,7 +289,7 @@ export default app;
 // The long-running boot sequence is only for local/server deployments.
 if (!process.env.VERCEL) {
   start().catch((err) => {
-    console.error("Failed to start server:", err);
+    console.error("Failed to start server:", safeError(err));
     process.exit(1);
   });
 }

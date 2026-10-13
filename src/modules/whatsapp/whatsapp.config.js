@@ -7,10 +7,9 @@ import { env } from "../../config/env.js";
  */
 export const WA_CONFIG = Object.freeze({
   graphBaseUrl: "https://graph.facebook.com",
-  requestTimeoutMs: 15000,
-  maxSendAttempts: 4, // first try + 3 retries for transient errors
+  requestTimeoutMs: env.whatsappSendTimeoutMs,
+  maxSendAttempts: 1 + env.whatsappMaxRetries,
   retryBackoffMs: [30_000, 120_000, 600_000], // worker-level backoff between attempts
-  inlineRetryDelaysMs: [500, 1500], // quick in-request retries on network/5xx
   customerServiceWindowMs: 24 * 60 * 60 * 1000,
   workerPollMs: 5000,
   workerLeaseMs: 60_000,
@@ -23,7 +22,23 @@ export function isDryRun() {
 }
 
 export function hasSendCredentials() {
-  return Boolean(env.whatsappAccessToken && env.whatsappPhoneNumberId);
+  return !env.whatsappConfigErrors.length && Boolean(env.whatsappAccessToken && env.whatsappPhoneNumberId);
+}
+
+export function configurationProblems() {
+  const missing = [...env.whatsappConfigErrors];
+  if (!isDryRun()) {
+    for (const [key, value] of [['WHATSAPP_ACCESS_TOKEN', env.whatsappAccessToken], ['WHATSAPP_PHONE_NUMBER_ID', env.whatsappPhoneNumberId], ['WHATSAPP_BUSINESS_ACCOUNT_ID', env.whatsappBusinessAccountId], ['WHATSAPP_APP_SECRET', env.whatsappAppSecret], ['WHATSAPP_VERIFY_TOKEN', env.whatsappVerifyToken]]) {
+      if (!value) missing.push(`${key} is missing`);
+    }
+  }
+  if (env.whatsappWebhookUrl) {
+    try {
+      const url = new URL(env.whatsappWebhookUrl);
+      if (url.protocol !== 'https:' || url.pathname !== '/api/whatsapp/webhook' || url.search || url.hash || url.username || url.password) missing.push('WHATSAPP_WEBHOOK_URL must be the public HTTPS /api/whatsapp/webhook URL');
+    } catch { missing.push('Invalid WHATSAPP_WEBHOOK_URL'); }
+  } else if (env.nodeEnv === 'production' && !isDryRun()) missing.push('WHATSAPP_WEBHOOK_URL is missing');
+  return missing;
 }
 
 export function isProduction() {
@@ -39,12 +54,17 @@ export function getConnectionStatus() {
   const credentials = hasSendCredentials();
   let mode = "live";
   if (dryRun) mode = "dry_run";
-  else if (!credentials) mode = "not_configured";
+  const problems = configurationProblems();
+  if (problems.length) mode = "not_ready";
 
   return {
     mode,
     dryRun,
-    canSendLive: !dryRun && credentials,
+    canSendLive: !dryRun && credentials && !problems.length,
+    readiness: problems.length ? 'NOT_READY' : dryRun ? 'DRY_RUN' : 'UNVERIFIED',
+    problems,
+    webhookUrl: env.whatsappWebhookUrl,
+    autoReplyAllowed: env.whatsappAutoReplyEnabled,
     apiVersion: env.whatsappApiVersion,
     phoneNumberId: env.whatsappPhoneNumberId || "",
     businessAccountId: env.whatsappBusinessAccountId || "",

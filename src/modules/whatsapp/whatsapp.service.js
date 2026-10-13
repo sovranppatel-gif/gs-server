@@ -1,3 +1,6 @@
+import { runWorkerTick, getWorkerState } from "./services/worker.service.js";
+import { WhatsAppSettings } from "./models/whatsappSettings.model.js";
+import { safeError } from "./whatsapp.security.js";
 import crypto from "crypto";
 import { env } from "../../config/env.js";
 import { WhatsAppTemplate } from "./models/whatsappTemplate.model.js";
@@ -28,22 +31,44 @@ export async function getOverviewStatus(masterAdmin) {
 }
 
 export async function getSettingsView(masterAdmin) {
-  const [settings, lastEvent] = await Promise.all([
+  const [settings, lastEvent, incoming, lastReply, failedReply, pending, failed] = await Promise.all([
     getSettings(),
-    WhatsAppWebhookEvent.findOne({ simulated: false }).sort({ receivedAt: -1 }).select("receivedAt eventType status").lean(),
+    WhatsAppWebhookEvent.findOne({ simulated: false }).sort({ receivedAt: -1 }).select('receivedAt eventType status').lean(),
+    WhatsAppMessage.findOne({ direction: 'inbound', simulatedInbound: { $ne: true }, providerMessageId: { $not: /^wamid\.SIM\./ } }).sort({ timestamp: -1 }).select('timestamp').lean(),
+    WhatsAppMessage.findOne({ origin: 'automation', dryRun: false, acceptedAt: { $ne: null } }).sort({ acceptedAt: -1 }).select('acceptedAt').lean(),
+    WhatsAppMessage.findOne({ origin: 'automation', dryRun: false, status: 'failed' }).sort({ failedAt: -1 }).select('failedAt error').lean(),
+    WhatsAppWebhookEvent.countDocuments({ status: { $in: ['received', 'processing'] } }),
+    WhatsAppWebhookEvent.countDocuments({ status: 'failed' }),
   ]);
+  const connection = getConnectionStatus();
+  const recentTest = settings.connectionTest;
+  const validated = recentTest?.ok && recentTest.phoneNumberId === env.whatsappPhoneNumberId && Date.now() - new Date(recentTest.testedAt).getTime() < 15 * 60 * 1000;
+  if (connection.canSendLive) connection.readiness = validated ? 'API_VALIDATED' : 'UNVERIFIED';
   return {
-    connection: getConnectionStatus(),
-    webhook: { lastRealEventAt: lastEvent?.receivedAt || null, lastEventType: lastEvent?.eventType || "", verifyTokenConfigured: Boolean(env.whatsappVerifyToken) },
-    settings,
-    permissions: permissionsFor(masterAdmin),
+    connection,
+    webhook: { lastRealEventAt: lastEvent?.receivedAt || null, lastEventType: lastEvent?.eventType || '', verifyTokenConfigured: Boolean(env.whatsappVerifyToken) },
+    diagnostics: {
+      lastIncomingAt: incoming?.timestamp || null,
+      lastAutoReplyAcceptedAt: lastReply?.acceptedAt || null,
+      lastFailedReplyAt: failedReply?.failedAt || null,
+      lastReplyError: failedReply?.error || null,
+      botEnabled: Boolean(settings.autoReplyEnabled && env.whatsappAutoReplyEnabled),
+      pendingEvents: pending, failedEvents: failed,
+      worker: { ...getWorkerState(), lastTickAt: settings.workerLastTickAt, lastCompletedAt: settings.workerLastCompletedAt, lastError: settings.workerLastError },
+      connectionTest: recentTest || null,
+    },
+    settings: Object.fromEntries(Object.entries(settings).filter(([key]) => !['workerLeaseToken', 'workerLockedUntil'].includes(key))), permissions: permissionsFor(masterAdmin),
   };
 }
 
 export async function testConnection() {
   const result = await checkPhoneNumber();
-  if (!result.ok) throw new HttpError(result.error.code === "NOT_CONFIGURED" ? 400 : 502, `Connection check failed: ${result.error.message}`);
-  return result.data;
+  await getSettings();
+  await WhatsAppSettings.updateOne({ key: 'default' }, { $set: { connectionTest: {
+    testedAt: new Date(), ok: result.ok, error: result.ok ? '' : safeError(result.error.message), phoneNumberId: env.whatsappPhoneNumberId,
+  } } });
+  if (!result.ok) throw new HttpError(result.error.code === 'NOT_READY' || result.error.code === 'DRY_RUN' ? 400 : 502, `Connection check failed: ${result.error.message}`);
+  return { ...result.data, apiValidated: true, webhookValidated: false };
 }
 
 /** Business-initiated conversation: must use a template (no open 24h window). */
@@ -101,6 +126,7 @@ export async function simulateInbound({ phone, text, name }) {
     ],
   };
   const summary = await ingestWebhook(body, { simulated: true });
+  await runWorkerTick({ maxCampaignSends: 0 });
   const contactConversation = await WhatsAppMessage.findOne({ providerMessageId: id }).select("conversationId").lean();
   return { summary, providerMessageId: id, conversationId: contactConversation?.conversationId || null };
 }
@@ -114,7 +140,7 @@ export async function simulateStatus({ providerMessageId, status }) {
     object: "whatsapp_business_account",
     entry: [
       {
-        id: "SIMULATED",
+        id: env.whatsappBusinessAccountId || "SIMULATED",
         changes: [
           {
             field: "messages",
@@ -136,5 +162,7 @@ export async function simulateStatus({ providerMessageId, status }) {
       },
     ],
   };
-  return ingestWebhook(body, { simulated: true });
+  const summary = await ingestWebhook(body, { simulated: true });
+  await runWorkerTick({ maxCampaignSends: 0 });
+  return summary;
 }

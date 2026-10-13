@@ -33,6 +33,8 @@ const whatsappContactSchema = new mongoose.Schema(
     optInAt: { type: Date, default: null },
     lastSeenAt: { type: Date, default: null },
     lastInboundAt: { type: Date, default: null },
+    processingToken: { type: String, default: "" },
+    processingUntil: { type: Date, default: null },
     notes: { type: String, default: "", trim: true },
     createdBy: { type: String, default: "system", trim: true },
     updatedBy: { type: String, default: "system", trim: true },

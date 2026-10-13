@@ -6,7 +6,7 @@ import mongoose from "mongoose";
  * sent / delivered / read → only from the status webhook (or dry-run simulation)
  * failed    → API or webhook reported an error
  */
-export const WA_MESSAGE_STATUSES = Object.freeze(["queued", "accepted", "sent", "delivered", "read", "failed", "received"]);
+export const WA_MESSAGE_STATUSES = Object.freeze(["queued", "sending", "accepted", "sent", "delivered", "read", "failed", "received"]);
 export const WA_MESSAGE_ORIGINS = Object.freeze(["customer", "agent", "automation", "campaign", "system"]);
 export const WA_STATUS_RANK = Object.freeze({ queued: 0, accepted: 1, sent: 2, delivered: 3, read: 4 });
 
@@ -14,6 +14,7 @@ const errorSchema = new mongoose.Schema(
   {
     code: { type: String, default: "" },
     message: { type: String, default: "" },
+    ambiguous: { type: Boolean, default: false },
     retryable: { type: Boolean, default: false },
   },
   { _id: false }
@@ -24,6 +25,8 @@ const whatsappMessageSchema = new mongoose.Schema(
     conversationId: { type: mongoose.Schema.Types.ObjectId, ref: "WhatsAppConversation", default: null },
     contactId: { type: mongoose.Schema.Types.ObjectId, ref: "WhatsAppContact", default: null },
     phone: { type: String, required: true, trim: true },
+    idempotencyKey: { type: String, default: "" },
+    simulatedInbound: { type: Boolean, default: false },
     providerMessageId: { type: String, default: "" },
     direction: { type: String, enum: ["inbound", "outbound"], required: true },
     messageType: { type: String, default: "text" },
@@ -41,6 +44,7 @@ const whatsappMessageSchema = new mongoose.Schema(
     campaignRecipientId: { type: mongoose.Schema.Types.ObjectId, ref: "WhatsAppCampaignRecipient", default: null },
     sentBy: { type: String, default: "", trim: true },
     dryRun: { type: Boolean, default: false },
+    queuedMode: { type: String, enum: ['', 'live', 'dry_run'], default: '' },
 
     // Outbox bookkeeping
     attempts: { type: Number, default: 0 },
@@ -56,6 +60,9 @@ const whatsappMessageSchema = new mongoose.Schema(
   },
   { timestamps: true, versionKey: false }
 );
+
+whatsappMessageSchema.index({ idempotencyKey: 1 }, { unique: true, partialFilterExpression: { idempotencyKey: { $gt: "" } } });
+whatsappMessageSchema.index({ status: 1, lockedUntil: 1 });
 
 // Idempotency: one row per provider message id
 whatsappMessageSchema.index(

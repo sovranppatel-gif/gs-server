@@ -5,6 +5,12 @@ import { WhatsAppContact } from "../models/whatsappContact.model.js";
 import { WhatsAppConversation } from "../models/whatsappConversation.model.js";
 import { WhatsAppTemplate } from "../models/whatsappTemplate.model.js";
 import { sendInteractive, sendMedia, sendTemplate, sendText } from "../whatsapp.client.js";
+import { env } from "../../../config/env.js";
+import { isDryRun } from "../whatsapp.config.js";
+import { getSettings } from "./settings.service.js";
+import { WorkshopWhatsappMessage } from '../../workshopManagement/workshopManagement.model.js';
+import { applyStatusUpdates as applyWorkshopStatusUpdates } from '../../workshopManagement/whatsapp.service.js';
+import { safeError } from "../whatsapp.security.js";
 import { WA_CONFIG } from "../whatsapp.config.js";
 import { isWithinServiceWindow, touchConversation } from "./conversation.service.js";
 import { renderTemplateBody, templateSendability } from "./template.service.js";
@@ -44,6 +50,8 @@ export async function createOutbound({
   campaignRecipientId = null,
   sentBy = "",
   touch = true,
+  idempotencyKey = "",
+  dryRun = isDryRun(),
 }) {
   let messageType = "text";
   if (template) messageType = "template";
@@ -56,6 +64,9 @@ export async function createOutbound({
     contactId,
     phone,
     direction: "outbound",
+    idempotencyKey,
+    dryRun,
+    queuedMode: dryRun ? 'dry_run' : 'live',
     messageType,
     text: cleanString(renderedText, 4096),
     templateName: template?.name || "",
@@ -97,7 +108,7 @@ function sendFor(message) {
 }
 
 /** Keeps the campaign recipient row in step with its message. */
-async function syncRecipient(message) {
+export async function syncRecipient(message) {
   if (!message.campaignRecipientId) return;
   const map = { accepted: "Sent", sent: "Sent", delivered: "Delivered", read: "Read", failed: "Failed" };
   const next = map[message.status];
@@ -131,8 +142,8 @@ async function syncRecipient(message) {
 export async function dispatchMessage(messageId) {
   const now = new Date();
   const message = await WhatsAppMessage.findOneAndUpdate(
-    { _id: messageId, status: "queued", $or: [{ lockedUntil: null }, { lockedUntil: { $lt: now } }] },
-    { $set: { lockedUntil: new Date(now.getTime() + WA_CONFIG.workerLeaseMs) }, $inc: { attempts: 1 } },
+    { _id: messageId, status: "queued", nextAttemptAt: { $lte: now }, $or: [{ lockedUntil: null }, { lockedUntil: { $lt: now } }] },
+    { $set: { status: "sending", lockedUntil: new Date(now.getTime() + WA_CONFIG.workerLeaseMs) }, $inc: { attempts: 1 } },
     { returnDocument: "after" }
   );
   if (!message) return null;
@@ -150,7 +161,27 @@ export async function dispatchMessage(messageId) {
     }
   }
 
-  const result = await sendFor(message);
+  let blocked = null;
+  if (!message.queuedMode) blocked = { code: 'LEGACY_MODE_UNKNOWN', message: 'Legacy queued message has no reliable operating mode. Review before an intentional retry.', retryable: false };
+  if (Boolean(message.dryRun) !== isDryRun()) blocked = { code: 'MODE_CHANGED', message: 'Message was queued in a different operating mode; recreate intentionally', retryable: false };
+  if (message.origin === 'automation') {
+    const [conversation, settings] = await Promise.all([
+      WhatsAppConversation.findById(message.conversationId).lean(), getSettings(),
+    ]);
+    if (conversation?.humanHandover || !settings.autoReplyEnabled || !env.whatsappAutoReplyEnabled) blocked = { code: 'BOT_PAUSED', message: 'Bot paused or disabled before dispatch', retryable: false };
+  }
+  if (message.messageType !== 'template') {
+    const conversation = message.conversationId ? await WhatsAppConversation.findById(message.conversationId).lean() : null;
+    if (!isWithinServiceWindow(conversation)) blocked = { code: 'WINDOW_CLOSED', message: '24-hour customer service window closed; approved template required', retryable: false };
+  } else {
+    const template = await WhatsAppTemplate.findOne({ name: message.templateName, language: message.templateLanguage }).lean();
+    if (!template || !templateSendability(template).allowed) blocked = { code: 'TEMPLATE_NOT_APPROVED', message: 'Template is unavailable or not Meta-approved', retryable: false };
+    if (!isDryRun() && template?.category === 'MARKETING') {
+      const contact = message.contactId ? await WhatsAppContact.findById(message.contactId).select('consentStatus').lean() : null;
+      if (contact?.consentStatus !== 'opted_in') blocked = { code: 'CONSENT_REQUIRED', message: 'Marketing template requires explicit opt-in', retryable: false };
+    }
+  }
+  const result = blocked ? { ok: false, error: blocked } : await sendFor(message);
   if (result.ok) {
     Object.assign(message, {
       status: "accepted",
@@ -163,7 +194,7 @@ export async function dispatchMessage(messageId) {
     });
   } else if (result.error.retryable && message.attempts < WA_CONFIG.maxSendAttempts) {
     const delay = WA_CONFIG.retryBackoffMs[Math.min(message.attempts - 1, WA_CONFIG.retryBackoffMs.length - 1)];
-    Object.assign(message, { error: result.error, lockedUntil: null, nextAttemptAt: new Date(Date.now() + delay) });
+    Object.assign(message, { status: "queued", error: result.error, lockedUntil: null, nextAttemptAt: new Date(Date.now() + delay) });
   } else {
     Object.assign(message, { status: "failed", failedAt: new Date(), error: result.error, lockedUntil: null, nextAttemptAt: null });
   }
@@ -174,14 +205,20 @@ export async function dispatchMessage(messageId) {
 }
 
 /** Claims and dispatches up to `limit` due messages; returns how many were processed. */
-export async function dispatchDueMessages({ limit = 20, origins = null, extraFilter = null } = {}) {
+export async function dispatchDueMessages({ limit = 20, origins = null, extraFilter = null, deadline = Date.now() + 20000 } = {}) {
   if (limit <= 0) return 0;
+  // A process may have died after Meta accepted the request. Never replay that send.
+  await WhatsAppMessage.updateMany({ status: 'sending', lockedUntil: { $lt: new Date() } }, { $set: {
+    status: 'failed', failedAt: new Date(), lockedUntil: null, nextAttemptAt: null,
+    error: { code: 'AMBIGUOUS_CRASH', message: 'Interrupted send; provider acceptance unknown. Do not resend without verification.', retryable: false, ambiguous: true },
+  } });
   const now = new Date();
   const filter = { status: "queued", nextAttemptAt: { $lte: now }, $or: [{ lockedUntil: null }, { lockedUntil: { $lt: now } }], ...(extraFilter || {}) };
   if (origins) filter.origin = { $in: origins };
   const due = await WhatsAppMessage.find(filter).select("_id").sort({ nextAttemptAt: 1 }).limit(limit).lean();
   let processed = 0;
   for (const row of due) {
+    if (Date.now() >= deadline) break;
     if (await dispatchMessage(row._id)) processed += 1;
   }
   return processed;
@@ -192,12 +229,20 @@ export async function dispatchDueMessages({ limit = 20, origins = null, extraFil
  * "read" is ignored). Returns "processed" or "ignored" (unknown message id —
  * e.g. a message sent by another module).
  */
-export async function applyStatusUpdate(status) {
+export async function applyStatusUpdate(status, { simulated = false } = {}) {
   const id = String(status?.id || "");
   const next = String(status?.status || "");
   if (!id || !["sent", "delivered", "read", "failed"].includes(next)) return "ignored";
   const message = await WhatsAppMessage.findOne({ providerMessageId: id });
-  if (!message) return "ignored";
+  if (!message) {
+    // Meta supports one configured callback. Preserve workshop delivery tracking too.
+    if (!simulated && await WorkshopWhatsappMessage.exists({ 'recipients.waMessageId': id })) {
+      await applyWorkshopStatusUpdates({ entry: [{ changes: [{ value: { statuses: [status] } }] }] });
+      return 'processed';
+    }
+    throw new Error('Status arrived before matching outbound record');
+  }
+  if (message.direction !== 'outbound' || Boolean(message.dryRun) !== Boolean(simulated)) return 'ignored';
 
   const at = status.timestamp ? new Date(Number(status.timestamp) * 1000) : new Date();
   if (next === "failed") {
@@ -206,7 +251,7 @@ export async function applyStatusUpdate(status) {
     Object.assign(message, {
       status: "failed",
       failedAt: at,
-      error: { code: String(err?.code || "FAILED"), message: cleanString(err?.error_data?.details || err?.title || err?.message || "Failed", 500), retryable: false },
+      error: { code: String(err?.code || "FAILED"), message: safeError(err?.error_data?.details || err?.title || err?.message || "Failed"), retryable: false },
     });
   } else {
     if ((WA_STATUS_RANK[next] ?? 0) <= (WA_STATUS_RANK[message.status] ?? -1)) return "processed";
@@ -269,8 +314,10 @@ export async function retryMessage(id) {
   const message = await WhatsAppMessage.findById(assertObjectId(id, "message id"));
   if (!message) throw notFound("Message not found");
   if (message.direction !== "outbound" || message.status !== "failed") throw badRequest("Only failed outbound messages can be retried");
+  if (message.error?.ambiguous || String(message.error?.code || '').startsWith('AMBIGUOUS_')) throw badRequest('Outcome is unknown. Check Meta delivery and contact before an intentional new send.');
   if (message.error?.code === "OPTED_OUT") throw badRequest("Contact has opted out");
   Object.assign(message, { status: "queued", error: null, failedAt: null, nextAttemptAt: new Date(), attempts: 0, lockedUntil: null });
+  if (!message.queuedMode) { message.queuedMode = isDryRun() ? 'dry_run' : 'live'; message.dryRun = isDryRun(); }
   await message.save();
   if (message.campaignRecipientId) {
     await WhatsAppCampaignRecipient.updateOne({ _id: message.campaignRecipientId }, { $set: { status: "Pending", error: "", failedAt: null } });

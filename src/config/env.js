@@ -1,4 +1,5 @@
 import dotenv from "dotenv";
+import { resolveWhatsappEnv } from "./whatsappEnv.js";
 
 dotenv.config();
 
@@ -30,16 +31,7 @@ export const env = {
   // OTP
   otpLength: Number(process.env.OTP_LENGTH) || 6,
   otpExpiryMinutes: Number(process.env.OTP_EXPIRY_MINUTES) || 5,
-  // WhatsApp Cloud API (Meta) — optional; workshop reminders are disabled without them
-  whatsappAccessToken: process.env.WHATSAPP_ACCESS_TOKEN || "",
-  whatsappPhoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || "",
-  whatsappApiVersion: process.env.WHATSAPP_API_VERSION || "v21.0",
-  whatsappAppSecret: process.env.WHATSAPP_APP_SECRET || "",
-  whatsappWebhookVerifyToken: process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || "",
-  // General WhatsApp module (src/modules/whatsapp). Dry run is ON unless explicitly "false".
-  whatsappBusinessAccountId: process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || "",
-  whatsappVerifyToken: process.env.WHATSAPP_VERIFY_TOKEN || process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || "",
-  whatsappDryRun: String(process.env.WHATSAPP_DRY_RUN ?? "true").trim().toLowerCase() !== "false",
+  ...resolveWhatsappEnv(),
   // Shared secret for the serverless queue tick (Vercel Cron sends it as a Bearer token)
   cronSecret: process.env.CRON_SECRET || "",
 };

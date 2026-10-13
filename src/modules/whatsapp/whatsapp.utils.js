@@ -1,3 +1,5 @@
+import { safeError } from "./whatsapp.security.js";
+import { currentExecution } from "./services/execution.service.js";
 import mongoose from "mongoose";
 import { emitSectionUpdate } from "../../lib/socket.js";
 
@@ -56,6 +58,7 @@ export function editor(req) {
 
 /** Live refresh hint for the admin UI. Never carries message bodies or phones. */
 export function notifyAdmin(action, extra = {}) {
+  if (currentExecution()) return; // worker notifies after transaction commit
   try {
     emitSectionUpdate({ section: "whatsapp", action, at: new Date().toISOString(), ...extra });
   } catch {
@@ -76,7 +79,7 @@ export function handle(fn, { status = 200, key = "data", tag = "request", errorM
         return res.status(400).json({ success: false, message: err.message });
       }
       if (err?.code === 11000) return res.status(409).json({ success: false, message: "Duplicate record" });
-      console.error(`[whatsapp] ${tag} error:`, err?.message || err);
+      console.error(`[whatsapp] ${tag} error:`, safeError(err));
       return res.status(500).json({ success: false, message: errorMessage });
     }
   };

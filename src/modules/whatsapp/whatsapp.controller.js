@@ -1,3 +1,4 @@
+import { safeError } from "./whatsapp.security.js";
 import crypto from "crypto";
 import { env } from "../../config/env.js";
 import { verifySignature } from "./whatsapp.client.js";
@@ -11,7 +12,7 @@ import * as campaigns from "./services/campaign.service.js";
 import * as audience from "./services/audience.service.js";
 import * as settings from "./services/settings.service.js";
 import * as reports from "./services/reports.service.js";
-import { ingestWebhook, listWebhookEvents } from "./services/webhook.service.js";
+import { ingestWebhook, listWebhookEvents, retryWebhookEvent } from "./services/webhook.service.js";
 import { runWorkerTick } from "./services/worker.service.js";
 import { validateSimulatedInbound, validateSimulatedStatus, validateStartConversation } from "./whatsapp.validation.js";
 import { editor, handle } from "./whatsapp.utils.js";
@@ -30,12 +31,10 @@ export function webhookVerify(req, res) {
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
   if (mode === "subscribe" && env.whatsappVerifyToken && safeEqual(token, env.whatsappVerifyToken)) {
-    return res.status(200).type("text/plain").send(String(challenge || ""));
+    return res.status(200).type("text/plain").send(String(challenge ?? ""));
   }
   return res.sendStatus(403);
 }
-
-let warnedNoSecret = false;
 
 /** POST: signature check → persist → process. Raw body is mounted by index.js. */
 export async function webhookReceive(req, res) {
@@ -43,14 +42,10 @@ export async function webhookReceive(req, res) {
   const check = verifySignature(raw, req.headers["x-hub-signature-256"]);
   if (!check.valid) {
     if (check.reason === "app_secret_missing") {
-      console.error("[whatsapp] webhook rejected: WHATSAPP_APP_SECRET is required in production");
+      console.error("[whatsapp] webhook rejected: WHATSAPP_APP_SECRET is required");
       return res.sendStatus(503);
     }
     return res.sendStatus(401);
-  }
-  if (check.reason === "skipped_no_secret_dev" && !warnedNoSecret) {
-    warnedNoSecret = true;
-    console.warn("[whatsapp] WHATSAPP_APP_SECRET not set — webhook signature check skipped (development only)");
   }
 
   let body;
@@ -64,7 +59,7 @@ export async function webhookReceive(req, res) {
     return res.sendStatus(200);
   } catch (err) {
     // Persisting failed (e.g. DB down) → non-200 so Meta redelivers later
-    console.error("[whatsapp] webhook ingest failed:", err?.message || err);
+    console.error("[whatsapp] webhook persistence failed:", safeError(err));
     return res.sendStatus(500);
   }
 }
@@ -75,10 +70,10 @@ export async function cronTick(req, res) {
   const [type, token] = String(req.headers.authorization || "").split(" ");
   if (type !== "Bearer" || !safeEqual(token, env.cronSecret)) return res.status(401).json({ success: false, message: "Unauthorized" });
   try {
-    const result = await runWorkerTick({ maxCampaignSends: 40 });
+    const result = await runWorkerTick({ maxCampaignSends: 40, deadline: Date.now() + 40000 });
     return res.json({ success: true, data: result });
   } catch (err) {
-    console.error("[whatsapp] cron tick failed:", err?.message || err);
+    console.error("[whatsapp] cron tick failed:", safeError(err));
     return res.status(500).json({ success: false, message: "Tick failed" });
   }
 }
@@ -89,6 +84,7 @@ export const getSettings = handle((req) => wa.getSettingsView(req.masterAdmin), 
 export const updateSettings = handle((req) => settings.updateSettings(req.body, editor(req)), { tag: "update settings" });
 export const testConnection = handle(() => wa.testConnection(), { tag: "test connection" });
 export const webhookEvents = handle((req) => listWebhookEvents(req.query), { tag: "webhook events" });
+export const retryEvent = handle((req) => retryWebhookEvent(req.params.id), { tag: 'retry webhook event' });
 export const runWorker = handle(() => runWorkerTick({ maxCampaignSends: 40 }), { tag: "run worker" });
 
 // Conversations -------------------------------------------------------------------

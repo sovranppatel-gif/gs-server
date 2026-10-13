@@ -2,9 +2,10 @@
   "version": 2,
   "functions": {
     "api/index.js": {
-      "maxDuration": 30
+      "maxDuration": 60
     }
   },
+  "crons": [{ "path": "/api/whatsapp/cron/tick", "schedule": "* * * * *" }],
   "rewrites": [
     {
       "source": "/(.*)",

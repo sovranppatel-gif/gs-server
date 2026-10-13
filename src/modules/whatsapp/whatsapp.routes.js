@@ -83,6 +83,7 @@ router.get("/settings", can(P.VIEW), c.getSettings);
 router.patch("/settings", can(P.SETTINGS), c.updateSettings);
 router.post("/settings/test-connection", can(P.SETTINGS), c.testConnection);
 router.get("/webhook-events", can(P.SETTINGS), c.webhookEvents);
+router.post('/webhook-events/:id/retry', can(P.SETTINGS), c.retryEvent);
 router.post("/worker/run", can(P.SETTINGS), c.runWorker);
 
 // Dry-run only

@@ -17,3 +17,7 @@ uploads/
 
 # Migration backups (may contain personal data)
 backups/
+
+# Local isolated Mongo test binaries and output
+.cache/
+.test-output/
