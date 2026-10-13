@@ -3,6 +3,7 @@ import { safeError } from '../src/modules/whatsapp/whatsapp.security.js';
 import mongoose from "mongoose";
 import { app } from "../src/index.js";
 import { connectMongo } from "../src/db/connectMongo.js";
+import { isWhatsappWebhookVerificationRequest } from '../src/middleware/requireDbReady.js';
 
 let mongoConnectionPromise = null;
 
@@ -22,7 +23,7 @@ async function ensureMongoConnection() {
 export default async function handler(req, res) {
   try {
     // Meta's verification handshake must work even while the DB is unavailable.
-    if (req.method === 'GET' && req.url?.split('?')[0] === '/api/whatsapp/webhook') return app(req, res);
+    if (isWhatsappWebhookVerificationRequest(req)) return app(req, res);
     await ensureMongoConnection();
     if (req.url?.startsWith('/api/whatsapp')) await initializeWhatsapp();
     return app(req, res);

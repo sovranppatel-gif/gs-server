@@ -110,12 +110,12 @@ before later upgrades. This check confirms the version published by Meta, not cr
 
 ## Exact callback URL
 
-The exact production hostname is not configured in this workspace. Do not assume the
-frontend `www.growskillstech.com` is the backend. Configure
-`WHATSAPP_WEBHOOK_URL=https://<actual-backend-host>/api/whatsapp/webhook`.
-If the website reverse-proxies `/api` to this backend, the corresponding URL would be
-`https://www.growskillstech.com/api/whatsapp/webhook`; this is conditional, not verified.
-Use Settings → Callback URL after deployment. Do not append `/api` twice.
+The backend deployment URL supplied by the owner is `https://gs-server-woad.vercel.app`.
+The exact callback is `https://gs-server-woad.vercel.app/api/whatsapp/webhook`.
+The local `WHATSAPP_WEBHOOK_URL` is set to this value. Set the same value in Vercel's
+production environment and redeploy, then enter it in Meta webhook configuration.
+Remote health/verification could not be confirmed from this environment; the supplied
+hostname is not evidence of successful webhook delivery. Do not append `/api` twice.
 
 ## Meta Dashboard setup
 

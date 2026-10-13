@@ -1,10 +1,18 @@
 import mongoose from "mongoose";
 
+/** Only Meta's public GET handshake is independent of database readiness. */
+export function isWhatsappWebhookVerificationRequest(req) {
+  const requestPath = String(req.originalUrl || req.url || '').split('?')[0];
+  return req.method === 'GET' && /^\/api\/whatsapp\/webhook\/?$/.test(requestPath);
+}
+
 /**
  * Fail fast when Mongo is down/reconnecting so login doesn't hang
  * on Atlas DNS flaps (ENOTFOUND / ReplicaSetNoPrimary).
  */
 export function requireDbReady(req, res, next) {
+  if (isWhatsappWebhookVerificationRequest(req)) return next();
+
   // 0 = disconnected, 1 = connected, 2 = connecting, 3 = disconnecting
   if (mongoose.connection.readyState === 1) {
     return next();

@@ -369,3 +369,28 @@ test('shared callback updates matching Workshop delivery status without running 
   assert.equal(await Message.countDocuments(), 0);
 });
 
+test('actual Express entry verifies with real MongoDB connected and disconnected', async () => {
+  // Use the serverless export to avoid starting the application's listener/worker.
+  const previousVercel = process.env.VERCEL;
+  process.env.VERCEL = '1';
+  const { app } = await import('../src/index.js');
+  const verificationServer = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => verificationServer.once('listening', resolve));
+  const url = `http://127.0.0.1:${verificationServer.address().port}/api/whatsapp/webhook?${new URLSearchParams({ 'hub.mode': 'subscribe', 'hub.verify_token': 'TEST_ONLY_VERIFY', 'hub.challenge': '000456' })}`;
+  try {
+    assert.equal(mongoose.connection.readyState, 1);
+    let response = await originalFetch(url);
+    assert.equal(response.status, 200); assert.equal(await response.text(), '000456');
+    await mongoose.disconnect();
+    assert.equal(mongoose.connection.readyState, 0);
+    response = await originalFetch(url);
+    assert.equal(response.status, 200); assert.equal(await response.text(), '000456');
+    const post = await originalFetch(url.split('?')[0], { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    assert.equal(post.status, 503);
+  } finally {
+    await new Promise((resolve) => verificationServer.close(resolve));
+    if (previousVercel === undefined) delete process.env.VERCEL;
+    else process.env.VERCEL = previousVercel;
+  }
+});
+

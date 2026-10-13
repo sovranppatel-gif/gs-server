@@ -1,4 +1,3 @@
-import { webhookVerify } from "./modules/whatsapp/whatsapp.controller.js";
 import { safeError } from './modules/whatsapp/whatsapp.security.js';
 import { initializeWhatsapp } from "./modules/whatsapp/services/initialize.service.js";
 import http from "http";
@@ -126,10 +125,9 @@ app.get("/api/index.js", (_req, res) => {
   });
 });
 
-// Verification is public and does not need MongoDB.
-app.get("/api/whatsapp/webhook", webhookVerify);
-
 // Fail fast on API while Mongo is reconnecting (avoids long hung logins)
+// requireDbReady exempts only GET /api/whatsapp/webhook; its handler lives in
+// whatsappRoutes below. POST and all other API routes retain the DB check.
 app.use("/api", requireDbReady);
 
 app.use("/api/master-admin/auth", masterAdminAuthRoutes);
